@@ -1,0 +1,49 @@
+@import "tailwindcss";
+@import "@fontsource/inter";
+@import "@fontsource/oswald";
+
+@theme {
+  --font-oswald: "Oswald", sans-serif;
+}
+
+:root {
+  --background: #000000;
+  --foreground: #f8fafc;
+  --primary: #27272a; /* deep zinc */
+  --primary-glow: rgba(255, 255, 255, 0.1);
+  --sidebar-bg: #050505;
+  --box-bg: rgba(255, 255, 255, 0.02);
+  --border: rgba(255, 255, 255, 0.05);
+  --muted: #64748b;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+}
+
+/* Custom Scrollbar for Sleek Look */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.glass-panel {
+  background: var(--box-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+}
