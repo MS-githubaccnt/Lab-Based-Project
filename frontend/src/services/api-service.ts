@@ -111,7 +111,7 @@ export interface ThoughtType {
 
 export interface MaterialPrediction {
   material_name: string;
-  eco_score: number;
+  // eco_score: number;
   confidence: number;
   predicted_strength_MPa: number | null;
   predicted_stiffness_GPa: number | null;

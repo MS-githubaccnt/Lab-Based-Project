@@ -93,7 +93,7 @@ class MLPredictorNode:
         # Model only provides material_name based on input snippet
         predictions = [{
             "material_name":           pred_material,
-            "eco_score":               0.80, # Stub eco score
+           # "eco_score":               0.80, # Stub eco score
             "confidence":              confidence,
             "predicted_strength_MPa":  None,
             "predicted_stiffness_GPa": None,
@@ -102,7 +102,7 @@ class MLPredictorNode:
         for i, p in enumerate(predictions, 1):
             new_thoughts.append(_t(node, "result",
                 f"#{i}: {p['material_name']} "
-                f"(eco {p['eco_score']:.2f} | conf {p['confidence']:.2f})"
+                # f"(eco {p['eco_score']:.2f} | conf {p['confidence']:.2f})"
             ))
 
         return {

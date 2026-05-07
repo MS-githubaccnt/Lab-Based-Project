@@ -125,14 +125,14 @@ class ExplanationNode(BaseAgentNode):
         new_thoughts.append(_thought(
             node, "result",
             f"Top material: {top.get('material_name', '?')} "
-            f"(eco score {top.get('eco_score', '?'):.2f})"
+            #f"(eco score {top.get('eco_score', '?'):.2f})"
         ))
         if len(predictions) > 1:
             runner = predictions[1]
             new_thoughts.append(_thought(
                 node, "result",
                 f"Runner-up: {runner.get('material_name', '?')} "
-                f"(eco score {runner.get('eco_score', '?'):.2f})"
+                #f"(eco score {runner.get('eco_score', '?'):.2f})"
             ))
         new_thoughts.append(
             _thought(node, "info", "Explanation complete. Ready for follow-up questions.")
@@ -338,8 +338,7 @@ def _build_followup_messages(
     The context injection is placed BEFORE the history so the LLM always
     has access to the raw numbers regardless of how long the conversation has grown.
     """
-    from explanation.prompt_builder import ExplanationPromptBuilder
-
+    # use global ExplanationPromptBuilder import
     ctx = pipeline_context
     context_block = ExplanationPromptBuilder.build_context_injection(
         object_description=ctx["object_description"],
