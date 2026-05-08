@@ -97,6 +97,12 @@ const getMaterialDescription = (material: MaterialPrediction): string => {
   return `${material.material_name} is a candidate match for the translated requirements, with estimated strength ${strength} MPa and stiffness ${stiffness} GPa.`;
 };
 
+const getContributionPercent = (material: MaterialPrediction, impact: number): number => {
+  const maxImpact = Math.max(...(material.feature_contributions ?? []).map(item => item.impact), 0);
+  if (!maxImpact) return 0;
+  return Math.max(8, Math.round((impact / maxImpact) * 100));
+};
+
 export const Dashboard: React.FC = () => {
   const [preview, setPreview] = useState<CadParserPreview | null>(null);
   const [status, setStatus] = useState<RunStatus>('idle');
@@ -466,11 +472,11 @@ const FeatureReview: React.FC<{
 
   return (
     <section className="grid gap-6 border border-slate-200 bg-white p-6">
-      <div className="grid gap-4 md:grid-cols-4">
+      {/* <div className="grid gap-4 md:grid-cols-4">
         {cards.map(card => (
           <FeatureCard key={card.title} {...card} />
         ))}
-      </div>
+      </div> */}
 
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard label="Expected Load" value={`${formatValue(expectedLoadN)} N`} />
@@ -621,8 +627,37 @@ const ReportSection: React.FC<{ report: ReportType }> = ({ report }) => {
                   </tr>
                   {isExpanded && (
                     <tr className="bg-slate-50">
-                      <td className="border-b border-slate-100 px-6 py-4 text-sm leading-6 text-slate-700" colSpan={4}>
-                        {getMaterialDescription(material)}
+                      <td className="border-b border-slate-100 px-6 py-4" colSpan={4}>
+                        <div className="grid gap-4">
+                          <p className="text-sm leading-6 text-slate-700">{getMaterialDescription(material)}</p>
+                          {Boolean(material.feature_contributions?.length) && (
+                            <div className="grid gap-3">
+                              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                SHAP Feature Contributions
+                              </p>
+                              {material.feature_contributions!.map(contribution => (
+                                <div key={contribution.feature} className="grid gap-1">
+                                  <div className="flex items-center justify-between gap-4 text-xs">
+                                    <span className="font-semibold text-slate-700">{contribution.label}</span>
+                                    <span className={contribution.direction === 'supports' ? 'text-emerald-700' : 'text-red-700'}>
+                                      {contribution.direction === 'supports' ? '+' : '-'}
+                                      {contribution.impact.toFixed(3)}
+                                    </span>
+                                  </div>
+                                  <div className="h-2 overflow-hidden rounded-sm bg-slate-200">
+                                    <div
+                                      className={contribution.direction === 'supports' ? 'h-full bg-emerald-600' : 'h-full bg-red-600'}
+                                      style={{ width: `${getContributionPercent(material, contribution.impact)}%` }}
+                                    />
+                                  </div>
+                                  <p className="text-xs text-slate-500">
+                                    Value: {formatValue(contribution.value)}
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   )}

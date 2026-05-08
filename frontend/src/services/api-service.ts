@@ -116,6 +116,16 @@ export interface MaterialPrediction {
   predicted_strength_MPa: number | null;
   predicted_stiffness_GPa: number | null;
   description?: string;
+  feature_contributions?: FeatureContribution[];
+}
+
+export interface FeatureContribution {
+  feature: string;
+  label: string;
+  value: number;
+  shap_value: number;
+  impact: number;
+  direction: "supports" | "opposes";
 }
 
 export interface ExplanationType {

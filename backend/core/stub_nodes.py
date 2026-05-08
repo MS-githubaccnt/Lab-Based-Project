@@ -63,10 +63,19 @@ class MLPredictorNode:
             _t(node, "info", "Running eco-material selection model...")
         ]
 
-        # Extract features from state
+        # Extract translated requirement features for the material selector.
         ml_input = state.get("ml_input_vector") or {}
-        modulus = ml_input.get("tensile_modulus_GPa", 0.0)
-        strength = ml_input.get("tensile_strength_MPa", 0.0)
+        feature_specs = [
+            ("required_stiffness_GPa", "Required stiffness", ml_input.get("required_stiffness_GPa", 0.0)),
+            (
+                "required_tensile_strength_MPa",
+                "Required tensile strength",
+                ml_input.get("required_tensile_strength_MPa", 0.0),
+            ),
+        ]
+        model_feature_names = [spec[0] for spec in feature_specs]
+        feature_labels = {spec[0]: spec[1] for spec in feature_specs}
+        feature_values = [float(spec[2] or 0.0) for spec in feature_specs]
 
         import numpy as np
         import warnings
@@ -74,7 +83,7 @@ class MLPredictorNode:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             # Build input array
-            input_data = np.array([[modulus, strength]])  # modulus, strength
+            input_data = np.array([feature_values])
             
             try:
                 # Perform prediction
@@ -95,15 +104,16 @@ class MLPredictorNode:
         class_labels = list(getattr(self.le, "classes_", []))
         if "probas" in locals() and class_labels:
             ranked = sorted(
-                zip(class_labels, probas),
-                key=lambda item: float(item[1]),
+                enumerate(zip(class_labels, probas)),
+                key=lambda item: float(item[1][1]),
                 reverse=True,
             )[:3]
         else:
-            ranked = [(pred_material, confidence)]
+            pred_index = _safe_class_index(pred_encoded[0] if "pred_encoded" in locals() else None)
+            ranked = [(pred_index, (pred_material, confidence))]
 
         predictions = []
-        for material_name, score in ranked:
+        for class_index, (material_name, score) in ranked:
             score = float(score)
             predictions.append({
                 "material_name":           str(material_name),
@@ -112,6 +122,13 @@ class MLPredictorNode:
                 "predicted_strength_MPa":  ml_input.get("required_tensile_strength_MPa"),
                 "predicted_stiffness_GPa": ml_input.get("required_stiffness_GPa"),
                 "description":             "",
+                "feature_contributions":   _build_shap_feature_contributions(
+                    model=self.pipeline,
+                    input_data=input_data,
+                    class_index=class_index,
+                    feature_names=model_feature_names,
+                    feature_labels=feature_labels,
+                ),
             })
 
         descriptions = await _generate_material_descriptions(
@@ -288,3 +305,88 @@ def _fallback_material_description(prediction: Dict[str, Any]) -> str:
         f"{material_name} is a candidate match{score_text} for the translated load "
         "and geometry requirements. Review detailed material datasheets before final selection."
     )
+
+
+def _safe_class_index(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _build_shap_feature_contributions(
+    model: Any,
+    input_data: Any,
+    class_index: int,
+    feature_names: List[str],
+    feature_labels: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    try:
+        import numpy as np
+        import shap
+
+        background = np.array([
+            [0.5, 10.0],
+            [1.5, 25.0],
+            [3.0, 50.0],
+            [8.0, 100.0],
+            [20.0, 200.0],
+        ])
+        explainer = shap.KernelExplainer(model.predict_proba, background)
+        shap_values = explainer.shap_values(input_data, nsamples=32)
+        class_values = _extract_class_shap_values(shap_values, class_index)
+
+        contributions = []
+        for feature_name, value, shap_value in zip(feature_names, input_data[0], class_values):
+            shap_value = float(shap_value)
+            contributions.append({
+                "feature": feature_name,
+                "label": feature_labels.get(feature_name, feature_name),
+                "value": float(value),
+                "shap_value": shap_value,
+                "impact": abs(shap_value),
+                "direction": "supports" if shap_value >= 0 else "opposes",
+            })
+
+        return sorted(contributions, key=lambda item: item["impact"], reverse=True)
+    except Exception:
+        return _fallback_feature_contributions(input_data, feature_names, feature_labels)
+
+
+def _extract_class_shap_values(shap_values: Any, class_index: int) -> List[float]:
+    if isinstance(shap_values, list):
+        index = min(max(class_index, 0), len(shap_values) - 1)
+        return list(shap_values[index][0])
+
+    shape = getattr(shap_values, "shape", ())
+    if len(shape) == 3:
+        index = min(max(class_index, 0), shape[2] - 1)
+        return list(shap_values[0, :, index])
+    if len(shape) == 2:
+        return list(shap_values[0])
+
+    return [0.0, 0.0]
+
+
+def _fallback_feature_contributions(
+    input_data: Any,
+    feature_names: List[str],
+    feature_labels: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    values = list(input_data[0])
+    total = sum(abs(float(value)) for value in values) or 1.0
+
+    contributions = []
+    for feature_name, value in zip(feature_names, values):
+        value = float(value)
+        impact = abs(value) / total
+        contributions.append({
+            "feature": feature_name,
+            "label": feature_labels.get(feature_name, feature_name),
+            "value": value,
+            "shap_value": 0.0,
+            "impact": impact,
+            "direction": "supports",
+        })
+
+    return sorted(contributions, key=lambda item: item["impact"], reverse=True)
