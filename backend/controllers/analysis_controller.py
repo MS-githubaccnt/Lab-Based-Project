@@ -57,12 +57,14 @@ from schema.api_models import (
     AcceptedResponse,
     ClarifyRequest,
     ClearSessionResponse,
+    ContinueAnalysisRequest,
     FollowupRequest,
     StartAnalysisRequest,
     TaskStatusResponse,
     ThoughtSchema,
 )
 from services.chat_service import ChatService
+from tools.cad_parser_tools import parse_and_extract_cad_features
 
 
 UPLOAD_DIR = Path("uploads")
@@ -87,6 +89,57 @@ def get_chat_service() -> ChatService:
     return _chat_service
 
 
+async def _save_uploaded_cad(file: UploadFile, allowed_extensions: set[str]) -> tuple[str, Path]:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File must have a name.")
+
+    ext = Path(file.filename).suffix.lower()
+    if ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed: {allowed_extensions}",
+        )
+
+    upload_id = str(uuid.uuid4())
+    file_path = UPLOAD_DIR / f"{upload_id}{ext}"
+
+    try:
+        size = 0
+        with open(file_path, "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+
+                if size > MAX_FILE_SIZE_MB * 1024 * 1024:
+                    buffer.close()
+                    file_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File exceeds {MAX_FILE_SIZE_MB} MB limit.",
+                    )
+
+                buffer.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
+    finally:
+        await file.close()
+
+    return upload_id, file_path
+
+
+def _cad_path_from_upload_id(upload_id: str) -> Path:
+    safe_upload_id = Path(upload_id).name
+    for ext in ALLOWED_EXTENSIONS:
+        candidate = UPLOAD_DIR / f"{safe_upload_id}{ext}"
+        if candidate.exists():
+            return candidate
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Uploaded CAD file '{upload_id}' was not found.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
@@ -95,6 +148,75 @@ router = APIRouter(
     prefix="/api/v1/analysis",
     tags=["Eco-Material Analysis"],
 )
+
+
+# =============================================================================
+# POST /parse — upload an STL and run only the CAD parser
+# =============================================================================
+
+@router.post(
+    "/parse",
+    summary="Upload STL and preview CAD parser features",
+)
+async def parse_cad_file(
+    file: UploadFile = File(...),
+) -> dict:
+    upload_id, file_path = await _save_uploaded_cad(file, {".stl"})
+
+    try:
+        geometry = parse_and_extract_cad_features.invoke({
+            "file_path": str(file_path),
+        })
+    except Exception as e:
+        file_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"CAD parser failed: {str(e)}",
+        )
+
+    return {
+        "upload_id": upload_id,
+        "filename": file.filename,
+        "geometry": geometry,
+    }
+
+
+# =============================================================================
+# POST /continue — start full analysis for a previously parsed upload
+# =============================================================================
+
+@router.post(
+    "/continue",
+    response_model=AcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Continue material analysis after CAD parser preview",
+)
+async def continue_analysis(
+    payload: ContinueAnalysisRequest,
+    background_tasks: BackgroundTasks,
+    service: ChatService = Depends(get_chat_service),
+) -> AcceptedResponse:
+    file_path = _cad_path_from_upload_id(payload.upload_id)
+    session_id = str(uuid.uuid4())
+    task_id = service.create_task()
+
+    background_tasks.add_task(
+        service.start_analysis_background,
+        task_id=task_id,
+        session_id=session_id,
+        cad_file_path=str(file_path),
+        object_description=payload.object_description,
+        recyclability_priority=payload.recyclability_priority,
+    )
+
+    return AcceptedResponse(
+        task_id=task_id,
+        session_id=session_id,
+        message=(
+            f"Analysis started for '{payload.object_description}'. "
+            f"Poll /status/{task_id} for progress."
+        ),
+    )
 
 
 # =============================================================================
@@ -114,20 +236,6 @@ async def start_analysis(
     recyclability_priority: float = Form(0.7),
     service: ChatService = Depends(get_chat_service),
 ) -> AcceptedResponse:
-
-    # -------------------------
-    # Validate file
-    # -------------------------
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="File must have a name.")
-
-    ext = Path(file.filename).suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type '{ext}'. Allowed: {ALLOWED_EXTENSIONS}",
-        )
-
     # -------------------------
     # Generate IDs
     # -------------------------
@@ -137,30 +245,7 @@ async def start_analysis(
     # -------------------------
     # Save file safely
     # -------------------------
-    unique_name = f"{uuid.uuid4()}{ext}"
-    file_path = UPLOAD_DIR / unique_name
-
-    try:
-        size = 0
-        with open(file_path, "wb") as buffer:
-            while chunk := await file.read(1024 * 1024):  # 1MB chunks
-                size += len(chunk)
-
-                if size > MAX_FILE_SIZE_MB * 1024 * 1024:
-                    buffer.close()
-                    file_path.unlink(missing_ok=True)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"File exceeds {MAX_FILE_SIZE_MB} MB limit.",
-                    )
-
-                buffer.write(chunk)
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
-
-    finally:
-        await file.close()
+    _, file_path = await _save_uploaded_cad(file, ALLOWED_EXTENSIONS)
 
     # -------------------------
     # Start background pipeline

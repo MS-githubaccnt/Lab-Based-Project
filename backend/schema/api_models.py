@@ -139,6 +139,31 @@ class FollowupRequest(BaseModel):
         return v.strip()
 
 
+class ContinueAnalysisRequest(BaseModel):
+    """
+    Payload for POST /api/v1/analysis/continue.
+    Starts the full material-selection pipeline after the CAD parser preview
+    has been reviewed in the frontend.
+    """
+    upload_id: str = Field(
+        min_length=1,
+        description="Identifier returned by POST /api/v1/analysis/parse.",
+    )
+    object_description: str = Field(
+        min_length=3,
+        max_length=500,
+        description="Plain-language description of the part.",
+    )
+    recyclability_priority: float = Field(default=0.7, ge=0.0, le=1.0)
+
+    @field_validator("object_description")
+    @classmethod
+    def continue_description_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("object_description must not be blank.")
+        return v.strip()
+
+
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------

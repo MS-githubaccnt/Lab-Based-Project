@@ -47,7 +47,6 @@ interface ChatBoxProps {
 export const ChatBox: React.FC<ChatBoxProps> = ({
   messages,
   sessionId,
-  isLoading,
   onStartAnalysis,
   onSubmitClarification,
   onAskFollowup,

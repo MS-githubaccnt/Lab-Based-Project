@@ -23,7 +23,7 @@
 
 import { auth } from "./firebase";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8080";
 const ANALYSIS_BASE = `${API_URL}/api/v1/analysis`;
 
 // =============================================================================
@@ -182,6 +182,12 @@ export interface ClearSessionResponse {
   message: string;
 }
 
+export interface CadParserPreview {
+  upload_id: string;
+  filename: string;
+  geometry: Record<string, unknown>;
+}
+
 // =============================================================================
 // Analysis pipeline API
 // =============================================================================
@@ -217,6 +223,47 @@ export const startAnalysis = async (
   if (!response.ok) {
     const detail = await _extractErrorDetail(response);
     throw new Error(`Failed to start analysis: ${detail}`);
+  }
+
+  return response.json();
+};
+
+export const parseCadFile = async (file: File): Promise<CadParserPreview> => {
+  const form = new FormData();
+  form.append("file", file);
+
+  const response = await fetch(`${ANALYSIS_BASE}/parse`, {
+    method: "POST",
+    headers: await getMultipartHeaders(),
+    body: form,
+  });
+
+  if (!response.ok) {
+    const detail = await _extractErrorDetail(response);
+    throw new Error(`Failed to parse CAD file: ${detail}`);
+  }
+
+  return response.json();
+};
+
+export const continueAnalysis = async (
+  uploadId: string,
+  objectDescription: string,
+  recyclabilityPriority = 0.7
+): Promise<AcceptedResponse> => {
+  const response = await fetch(`${ANALYSIS_BASE}/continue`, {
+    method: "POST",
+    headers: await getHeaders(),
+    body: JSON.stringify({
+      upload_id: uploadId,
+      object_description: objectDescription,
+      recyclability_priority: recyclabilityPriority,
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await _extractErrorDetail(response);
+    throw new Error(`Failed to continue analysis: ${detail}`);
   }
 
   return response.json();

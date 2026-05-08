@@ -7,13 +7,13 @@
 }
 
 :root {
-  --background: #000000;
-  --foreground: #f8fafc;
-  --primary: #27272a; /* deep zinc */
-  --primary-glow: rgba(255, 255, 255, 0.1);
-  --sidebar-bg: #050505;
-  --box-bg: rgba(255, 255, 255, 0.02);
-  --border: rgba(255, 255, 255, 0.05);
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --primary: #0f172a;
+  --primary-glow: rgba(15, 23, 42, 0.08);
+  --sidebar-bg: #ffffff;
+  --box-bg: #ffffff;
+  --border: #e2e8f0;
   --muted: #64748b;
 }
 
@@ -26,24 +26,21 @@ body {
   overflow-x: hidden;
 }
 
-/* Custom Scrollbar for Sleek Look */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: #cbd5e1;
   border-radius: 0;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: #94a3b8;
 }
 
 .glass-panel {
   background: var(--box-bg);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border);
 }
