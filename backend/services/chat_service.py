@@ -18,16 +18,12 @@ Responsibilities
       Begin a new eco-material analysis run. Called as a background task
       from your API route so the HTTP response returns immediately.
 
-  resume_clarification_background(...)
-      Resume a pipeline that paused for clarification. Called as a
-      background task after the user submits their answer.
-
   ask_followup_background(...)
       Answer a follow-up question about the completed recommendation.
       No pipeline re-run — handled by ExplanationNode directly.
 
   clear_session(session_id)
-      Invalidate a LangGraph session so it cannot be resumed or followed up.
+      Invalidate a LangGraph session so it cannot be followed up.
       Does not delete task history — only blocks future pipeline operations
       on this session.
 
@@ -51,17 +47,6 @@ Usage (FastAPI example)
     @app.get("/analysis/status/{task_id}")
     def status(task_id: str):
         return chat_service.get_task_status(task_id)
-
-    @app.post("/analysis/clarify")
-    async def clarify(req: ClarifyRequest, background_tasks: BackgroundTasks):
-        task_id = chat_service.create_task()
-        background_tasks.add_task(
-            chat_service.resume_clarification_background,
-            task_id=task_id,
-            session_id=req.session_id,
-            clarification_answer=req.answer,
-        )
-        return {"task_id": task_id}
 
     @app.post("/analysis/followup")
     async def followup(req: FollowupRequest, background_tasks: BackgroundTasks):
@@ -134,7 +119,7 @@ class ChatService:
 
         Returns a dict with keys:
             task_id, status, progress, thoughts, result,
-            clarification_question, error, created_at, updated_at.
+            error, created_at, updated_at.
 
         Returns {"error": "Task not found"} if the task_id is unknown.
         """
@@ -154,6 +139,8 @@ class ChatService:
         cad_file_path: str,
         object_description: str,
         recyclability_priority: float = 0.7,
+        expected_load_n: Optional[float] = None,
+        safety_factor: Optional[float] = None,
     ) -> None:
         """
         Run a new eco-material analysis pipeline in the background.
@@ -169,6 +156,8 @@ class ChatService:
             cad_file_path:          Absolute path to the .step, .stp, or .stl file.
             object_description:     Plain-language part description.
             recyclability_priority: Eco weighting 0.0–1.0. Default 0.7.
+            expected_load_n:        Optional user-approved expected load in N.
+            safety_factor:          Optional user-approved factor of safety.
         """
         if session_id in self._cleared_sessions:
             self.task_store.fail_task(
@@ -186,40 +175,8 @@ class ChatService:
                 object_description=object_description,
                 session_id=session_id,
                 recyclability_priority=recyclability_priority,
-                progress_callback=self._make_progress_callback(task_id),
-            )
-            self.task_store.complete_task(task_id, result.to_dict())
-
-        except Exception as exc:
-            self.task_store.fail_task(task_id, str(exc))
-            raise
-
-    async def resume_clarification_background(
-        self,
-        task_id: str,
-        session_id: str,
-        clarification_answer: str,
-    ) -> None:
-        """
-        Resume a pipeline that paused to ask a clarification question.
-
-        Call this after the user answers the question shown in a task
-        with status='clarification_needed'.
-
-        Args:
-            task_id:                From a new create_task() call.
-            session_id:             The session_id from the original start call.
-            clarification_answer:   User's answer to the clarification question.
-        """
-        self._check_session(task_id, session_id)
-        self.task_store.update_task_progress(
-            task_id, "Resuming analysis with your answer..."
-        )
-
-        try:
-            result = await self.orchestrator.resume_with_clarification(
-                session_id=session_id,
-                clarification_answer=clarification_answer,
+                expected_load_n=expected_load_n,
+                safety_factor=safety_factor,
                 progress_callback=self._make_progress_callback(task_id),
             )
             self.task_store.complete_task(task_id, result.to_dict())
@@ -268,7 +225,7 @@ class ChatService:
 
     def clear_session(self, session_id: str) -> bool:
         """
-        Invalidate a session so it cannot be resumed or followed up.
+        Invalidate a session so it cannot be followed up.
 
         This does NOT delete task history — existing task_ids for this
         session remain readable via get_task_status(). It only prevents
@@ -299,7 +256,7 @@ class ChatService:
         """
         if session_id in self._cleared_sessions:
             msg = (
-                f"Session '{session_id}' has been cleared and cannot be resumed. "
+                f"Session '{session_id}' has been cleared. "
                 "Start a new analysis with start_analysis_background()."
             )
             self.task_store.fail_task(task_id, msg)

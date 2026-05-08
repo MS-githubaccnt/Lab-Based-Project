@@ -71,7 +71,7 @@ class ExplanationNode(BaseAgentNode):
         Generate the initial explanation for the current recommendation.
 
         Reads:  object_description, geometry, load_estimate,
-                ml_input_vector, predictions, clarification_answer (optional)
+                ml_input_vector, predictions
         Writes: explanation, pipeline_context, conversation_history,
                 thoughts (appended), pipeline_stage
         """
@@ -80,8 +80,6 @@ class ExplanationNode(BaseAgentNode):
         load_estimate      = self._require(state, "load_estimate",      dict)
         ml_input_vector    = self._require(state, "ml_input_vector",    dict)
         predictions        = self._require(state, "predictions",        list)
-        clarification      = state.get("clarification_answer")
-
         existing_thoughts  = list(state.get("thoughts") or [])
         node               = "explanation"
 
@@ -113,7 +111,6 @@ class ExplanationNode(BaseAgentNode):
             load_estimate=load_estimate,
             ml_input_vector=ml_input_vector,
             predictions=predictions,
-            clarification_answer=clarification,
         )
         messages = [{"role": "user", "content": user_message}]
 

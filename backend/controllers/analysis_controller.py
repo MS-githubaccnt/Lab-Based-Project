@@ -9,10 +9,6 @@ Routes
       Queue a new eco-material analysis. Returns task_id immediately.
       Frontend polls /status/{task_id} to track progress.
 
-  POST   /api/v1/analysis/clarify
-      Submit an answer to a clarification question.
-      Call after polling returns status='clarification_needed'.
-
   POST   /api/v1/analysis/followup
       Ask a follow-up question about a completed recommendation.
       No pipeline re-run — ExplanationNode answers directly from context.
@@ -21,15 +17,15 @@ Routes
       Poll task progress. Returns status, thoughts, result, or error.
 
   DELETE /api/v1/analysis/{session_id}
-      Invalidate a session. Blocks future clarify/followup on this session.
+      Invalidate a session. Blocks future follow-up calls on this session.
 
 Dependency injection
 --------------------
 ChatService is a MODULE-LEVEL SINGLETON — not instantiated per-request.
 
 This is critical: our orchestrator uses LangGraph's MemorySaver to store
-pipeline checkpoints between process_request() and resume_with_clarification()
-/ ask_followup() calls. If ChatService were re-created per-request (like the
+pipeline checkpoints between process_request() and ask_followup() calls.
+If ChatService were re-created per-request (like the
 reference pattern), each instance would have its own empty MemorySaver and
 resume/followup calls would find no checkpoint.
 
@@ -55,16 +51,19 @@ from fastapi import (
 from pathlib import Path
 from schema.api_models import (
     AcceptedResponse,
-    ClarifyRequest,
     ClearSessionResponse,
     ContinueAnalysisRequest,
+    FeaturePreviewRequest,
     FollowupRequest,
+    LoadPreviewRequest,
     StartAnalysisRequest,
     TaskStatusResponse,
     ThoughtSchema,
 )
+from agents.load_inference.node import LoadInferenceNode
 from services.chat_service import ChatService
 from tools.cad_parser_tools import parse_and_extract_cad_features
+from tools.files.translate_features_to_ml_inputs import translate_features_to_ml_inputs
 
 
 UPLOAD_DIR = Path("uploads")
@@ -182,6 +181,98 @@ async def parse_cad_file(
 
 
 # =============================================================================
+# POST /load-preview — run LoadInferenceNode before full material analysis
+# =============================================================================
+
+@router.post(
+    "/load-preview",
+    summary="Preview inferred load assumptions",
+)
+async def preview_load_assumptions(
+    payload: LoadPreviewRequest,
+) -> dict:
+    file_path = _cad_path_from_upload_id(payload.upload_id)
+
+    try:
+        geometry = parse_and_extract_cad_features.invoke({
+            "file_path": str(file_path),
+        })
+        node_output = await LoadInferenceNode().invoke({
+            "object_description": payload.object_description,
+            "geometry": geometry,
+            "thoughts": [],
+        })
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Load inference failed: {str(e)}",
+        )
+
+    load_estimate = node_output["load_estimate"]
+    magnitude_range = load_estimate.get("magnitude_range_N") or [0, 0]
+
+    return {
+        "load_estimate": load_estimate,
+        "expected_load_n": float(magnitude_range[1] or 0),
+        "safety_factor": float(load_estimate.get("safety_factor") or 1.0),
+        "thoughts": node_output.get("thoughts", []),
+    }
+
+
+# =============================================================================
+# POST /feature-preview — run feature translation before final analysis
+# =============================================================================
+
+@router.post(
+    "/feature-preview",
+    summary="Preview translated mechanical feature requirements",
+)
+async def preview_feature_translation(
+    payload: FeaturePreviewRequest,
+) -> dict:
+    file_path = _cad_path_from_upload_id(payload.upload_id)
+
+    try:
+        geometry = parse_and_extract_cad_features.invoke({
+            "file_path": str(file_path),
+        })
+        load_output = await LoadInferenceNode().invoke({
+            "object_description": payload.object_description,
+            "geometry": geometry,
+            "expected_load_n": payload.expected_load_n,
+            "safety_factor": payload.safety_factor,
+            "thoughts": [],
+        })
+        load_estimate = load_output["load_estimate"]
+        translated = translate_features_to_ml_inputs.invoke({
+            "geometry": geometry,
+            "load_estimate": load_estimate,
+            "recyclability_priority": 0.7,
+        })
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Feature translation failed: {str(e)}",
+        )
+
+    return {
+        "geometry": geometry,
+        "load_estimate": load_estimate,
+        "ml_input_vector": translated,
+        "interpreted_features": {
+            "surface_profile": geometry.get("dominant_axis"),
+            "thin_features": geometry.get("has_thin_features"),
+            "watertight": geometry.get("is_watertight"),
+            "stress_mode": load_estimate.get("primary_stress_mode"),
+            "load_type": load_estimate.get("load_type"),
+            "fatigue_critical": load_estimate.get("is_fatigue_critical"),
+            "stiffness_dominated": translated.get("stiffness_dominated"),
+            "buckling_risk": translated.get("buckling_risk"),
+        },
+    }
+
+
+# =============================================================================
 # POST /continue — start full analysis for a previously parsed upload
 # =============================================================================
 
@@ -207,6 +298,8 @@ async def continue_analysis(
         cad_file_path=str(file_path),
         object_description=payload.object_description,
         recyclability_priority=payload.recyclability_priority,
+        expected_load_n=payload.expected_load_n,
+        safety_factor=payload.safety_factor,
     )
 
     return AcceptedResponse(
@@ -270,57 +363,6 @@ async def start_analysis(
             f"Poll /status/{task_id} for progress."
         ),
     )
-
-# =============================================================================
-# POST /clarify — submit answer to clarification question
-# =============================================================================
-
-@router.post(
-    "/clarify",
-    response_model=AcceptedResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Submit clarification answer",
-    description=(
-        "Called after polling returns status='clarification_needed'. "
-        "Submit the user's answer to the clarification question shown in the "
-        "task status. The pipeline resumes in the background."
-    ),
-)
-async def submit_clarification(
-    payload: ClarifyRequest,
-    background_tasks: BackgroundTasks,
-    service: ChatService = Depends(get_chat_service),
-) -> AcceptedResponse:
-    # Validate that the session exists and has not been cleared.
-    # A cleared session raises ValueError in the background method —
-    # we surface it here as 409 Conflict before queuing the task.
-    if payload.session_id in service._cleared_sessions:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"Session '{payload.session_id}' has been cleared and cannot "
-                "be resumed. Start a new analysis with POST /start."
-            ),
-        )
-
-    task_id = service.create_task()
-
-    background_tasks.add_task(
-        service.resume_clarification_background,
-        task_id=task_id,
-        session_id=payload.session_id,
-        clarification_answer=payload.clarification_answer,
-    )
-
-    return AcceptedResponse(
-        task_id=task_id,
-        session_id=payload.session_id,
-        message=(
-            f"Clarification received. Resuming analysis. "
-            f"Poll /status/{task_id} for progress."
-        ),
-    )
-
 
 # =============================================================================
 # POST /followup — ask a follow-up question
@@ -417,7 +459,6 @@ async def get_task_status(
         progress=task_data.get("progress"),
         thoughts=thoughts,
         result=task_data.get("result"),
-        clarification_question=task_data.get("clarification_question"),
         error=task_data.get("error"),
     )
 
@@ -457,6 +498,6 @@ async def clear_session(
         status="success",
         message=(
             f"Session '{session_id}' cleared. "
-            "Future clarify and follow-up calls on this session will be rejected."
+            "Future follow-up calls on this session will be rejected."
         ),
     )

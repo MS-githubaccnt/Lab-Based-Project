@@ -3,18 +3,12 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { LoginForm } from '../components/LoginForm';
 import { SignupForm } from '../components/SignupForm';
 import { Branding } from '../sub-components/Branding';
-import DarkVeil from '../sub-components/react-bits/DarkVeil/DarkVeil';
 
 export const Landing: React.FC = () => {
   const [isLogin, setIsLogin] = useState(true);
 
   return (
     <div className="min-h-screen w-full flex flex-col relative overflow-hidden bg-background">
-      {/* Dark Veil Background Effect */}
-      <div className="absolute inset-0 z-0">
-        <DarkVeil speed={0.5} hueShift={0} noiseIntensity={0.05} scanlineIntensity={0.2} scanlineFrequency={100} warpAmount={0.2} resolutionScale={1} />
-      </div>
-
       {/* Main Content */}
       <div className="relative z-10 flex-1 flex flex-col items-center justify-center p-6">
         <motion.div 

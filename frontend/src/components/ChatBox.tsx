@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ResponseBox } from '../sub-components/ResponseBox';
 import { ThoughtBox } from '../sub-components/ThoughtBox';
 import { TextField } from '../sub-components/TextField';
-import LightRays from '../sub-components/react-bits/LightRays/LightRays';
+import { CheckCircle2, FileUp, Leaf, Paperclip, X } from 'lucide-react';
 import { type AnalysisMessage } from '../pages/Dashboard';
 
 // ---------------------------------------------------------------------------
@@ -13,14 +13,12 @@ import { type AnalysisMessage } from '../pages/Dashboard';
 type InputMode =
   | 'analysis'       // no messages yet, or last is complete/failed — show file upload
   | 'followup'       // last analysis message is complete — show text-only input
-  | 'clarification'  // last message is waiting for clarification — show answer input
   | 'disabled';      // pipeline is running — input locked
 
 function deriveInputMode(messages: AnalysisMessage[]): InputMode {
   const last = messages.at(-1);
   if (!last) return 'analysis';
   if (last.status === 'pending' || last.status === 'running') return 'disabled';
-  if (last.status === 'clarification_needed') return 'clarification';
   if (last.status === 'complete') return 'followup';
   // failed or any other terminal state — allow starting a fresh analysis
   return 'analysis';
@@ -36,7 +34,6 @@ interface ChatBoxProps {
   sessionId: string | null;
   isLoading: boolean;
   onStartAnalysis: (file: File, objectDescription: string, recyclabilityPriority: number) => void;
-  onSubmitClarification: (sessionId: string, answer: string) => void;
   onAskFollowup: (sessionId: string, question: string) => void;
 }
 
@@ -48,7 +45,6 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
   messages,
   sessionId,
   onStartAnalysis,
-  onSubmitClarification,
   onAskFollowup,
 }) => {
   const bottomRef  = useRef<HTMLDivElement>(null);
@@ -57,8 +53,6 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
   // Local state for the analysis input form
   const [selectedFile, setSelectedFile]   = useState<File | null>(null);
   const [description, setDescription]     = useState('');
-  const [ecoWeight, setEcoWeight]         = useState(0.7);
-  const [clarifyAnswer, setClarifyAnswer] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Auto-scroll to bottom when messages or thoughts update
@@ -70,18 +64,11 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
 
   const handleAnalysisSubmit = () => {
     if (!selectedFile || !description.trim()) return;
-    onStartAnalysis(selectedFile, description.trim(), ecoWeight);
+    onStartAnalysis(selectedFile, description.trim(), 0.7);
     // Reset form
     setSelectedFile(null);
     setDescription('');
-    setEcoWeight(0.7);
     if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const handleClarifySubmit = () => {
-    if (!clarifyAnswer.trim() || !sessionId) return;
-    onSubmitClarification(sessionId, clarifyAnswer.trim());
-    setClarifyAnswer('');
   };
 
   const handleFollowupSend = (text: string) => {
@@ -103,8 +90,9 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
         <div className="flex justify-end">
           <div className="max-w-[70%] rounded-2xl bg-white/10 border border-white/10 px-4 py-3 text-sm text-white">
             {msg.fileName && (
-              <p className="text-xs text-slate-400 mb-1 font-mono">
-                📎 {msg.fileName}
+              <p className="flex items-center gap-1 text-xs text-slate-400 mb-1 font-mono">
+                <Paperclip className="h-3 w-3" />
+                {msg.fileName}
               </p>
             )}
             <p>{msg.prompt}</p>
@@ -138,20 +126,6 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
           <p className="text-xs text-slate-500 px-2">{msg.progress}</p>
         )}
 
-        {/* Clarification question */}
-        {msg.status === 'clarification_needed' && msg.clarificationQuestion && (
-          <motion.div
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="self-start max-w-[85%] rounded-2xl bg-amber-500/10 border border-amber-500/20 px-4 py-3 text-sm text-amber-200"
-          >
-            <p className="text-xs font-semibold text-amber-400 mb-1 uppercase tracking-wider">
-              Clarification needed
-            </p>
-            <p>{msg.clarificationQuestion}</p>
-          </motion.div>
-        )}
-
         {/* Final explanation / followup answer */}
         {msg.status === 'complete' && (explanation || followupAns) && (
           <motion.div
@@ -172,7 +146,7 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
         {msg.status === 'complete' && (msg.result?.warnings?.length ?? 0) > 0 && (
           <div className="flex flex-col gap-1 px-2">
             {msg.result!.warnings.map((w, i) => (
-              <p key={i} className="text-xs text-amber-400/80">⚠ {w}</p>
+              <p key={i} className="text-xs text-amber-400/80">Warning: {w}</p>
             ))}
           </div>
         )}
@@ -206,30 +180,6 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
       );
     }
 
-    if (inputMode === 'clarification') {
-      return (
-        <div className="flex flex-col gap-2">
-          <p className="text-xs text-amber-400/80 px-1">Answer the question above to continue the analysis</p>
-          <div className="flex gap-2">
-            <input
-              className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-400/40 transition-colors"
-              placeholder="Your answer..."
-              value={clarifyAnswer}
-              onChange={e => setClarifyAnswer(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleClarifySubmit()}
-            />
-            <button
-              onClick={handleClarifySubmit}
-              disabled={!clarifyAnswer.trim()}
-              className="px-5 py-3 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-300 text-sm font-medium hover:bg-amber-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              Submit
-            </button>
-          </div>
-        </div>
-      );
-    }
-
     if (inputMode === 'followup') {
       return (
         <div className="flex flex-col gap-1">
@@ -255,7 +205,7 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
               : 'border-white/10 bg-white/5 text-slate-400 hover:border-white/20 hover:bg-white/8'
             }`}
         >
-          <span className="text-lg">{selectedFile ? '✅' : '📁'}</span>
+          {selectedFile ? <CheckCircle2 className="h-5 w-5" /> : <FileUp className="h-5 w-5" />}
           <span>
             {selectedFile
               ? `${selectedFile.name} (${(selectedFile.size / 1024).toFixed(0)} KB)`
@@ -264,9 +214,10 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
           {selectedFile && (
             <button
               onClick={e => { e.stopPropagation(); setSelectedFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
-              className="ml-auto text-slate-500 hover:text-red-400 transition-colors text-xs"
+              className="ml-auto inline-flex items-center gap-1 text-slate-500 hover:text-red-400 transition-colors text-xs"
             >
-              ✕ Remove
+              <X className="h-3 w-3" />
+              Remove
             </button>
           )}
         </div>
@@ -287,26 +238,13 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
           onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleAnalysisSubmit()}
         />
 
-        {/* Eco priority + submit row */}
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 flex-1 text-xs text-slate-400">
-            <span className="whitespace-nowrap">Eco priority</span>
-            <input
-              type="range"
-              min={0} max={1} step={0.05}
-              value={ecoWeight}
-              onChange={e => setEcoWeight(Number(e.target.value))}
-              className="flex-1 accent-green-400"
-            />
-            <span className="w-8 text-right">{ecoWeight.toFixed(2)}</span>
-          </div>
-
+        <div className="flex justify-end">
           <button
             onClick={handleAnalysisSubmit}
             disabled={!selectedFile || !description.trim()}
             className="px-5 py-2.5 rounded-xl bg-blue-500/20 border border-blue-500/30 text-blue-300 text-sm font-medium hover:bg-blue-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
           >
-            Analyse →
+            Analyse
           </button>
         </div>
       </div>
@@ -317,11 +255,6 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
 
   return (
     <div className="flex-1 h-full flex flex-col relative overflow-hidden bg-background">
-
-      {/* Background */}
-      <div className="absolute inset-0 pointer-events-none opacity-40 z-0">
-        <LightRays />
-      </div>
 
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto px-8 py-10 custom-scrollbar z-10">
@@ -334,7 +267,7 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
               className="w-24 h-24 mb-6 bg-white/5 border border-white/10 flex items-center justify-center shadow-2xl"
             >
               <div className="w-12 h-12 bg-blue-500/20 blur-xl animate-pulse" />
-              <div className="absolute text-3xl">🌿</div>
+              <Leaf className="absolute h-8 w-8 text-blue-200" />
             </motion.div>
             <h3 className="text-xl font-medium text-white mb-2">
               Eco-material analysis

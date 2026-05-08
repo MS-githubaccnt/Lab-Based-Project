@@ -21,7 +21,7 @@ export const ThoughtBox: React.FC<ThoughtBoxProps> = ({ thoughts }) => {
       <div className="flex items-center gap-3 mb-4">
         <div className="w-1.5 h-1.5 rounded-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.8)] animate-pulse" />
         <div className="text-xs uppercase tracking-widest font-medium">
-          <ShinyText text="AI Thinking Context" disabled={false} speed={2} className="text-blue-200/80" />
+          <ShinyText text="Pipeline Context" disabled={false} speed={2} className="text-blue-200/80" />
         </div>
       </div>
       <div className="flex flex-col gap-2 pl-4 border-l-2 border-blue-500/20">

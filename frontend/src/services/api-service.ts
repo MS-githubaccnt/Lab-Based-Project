@@ -15,7 +15,7 @@
  *
  * - ChatService is a singleton on the backend, so session_id is the stable
  *   identifier for a pipeline run. Store it alongside task_id and pass it
- *   to clarify / followup / clearSession calls.
+ *   to followup / clearSession calls.
  *
  * - startPolling() returns a cancel function. Always call it on component
  *   unmount or when the user navigates away, to avoid orphaned intervals.
@@ -111,10 +111,11 @@ export interface ThoughtType {
 
 export interface MaterialPrediction {
   material_name: string;
-  // eco_score: number;
+  eco_score?: number;
   confidence: number;
   predicted_strength_MPa: number | null;
   predicted_stiffness_GPa: number | null;
+  description?: string;
 }
 
 export interface ExplanationType {
@@ -130,10 +131,70 @@ export interface ReportType {
   mechanical_requirements: Record<string, unknown> | null;
   geometry_summary: Record<string, unknown> | null;
   inference_confidence: number | null;
-  clarification_used: boolean;
   warnings: string[];
   /** Full thought trace from all pipeline nodes, included in the report. */
   all_thoughts: ThoughtType[];
+}
+
+export interface LoadEstimate {
+  load_type: string;
+  primary_stress_mode: string;
+  magnitude_range_N: [number, number] | number[];
+  safety_factor: number;
+  operating_temp_C: [number, number] | number[];
+  is_fatigue_critical: boolean;
+  deflection_category: string;
+  confidence: number;
+  reasoning: string;
+}
+
+export interface LoadPreview {
+  load_estimate: LoadEstimate;
+  expected_load_n: number;
+  safety_factor: number;
+  thoughts: ThoughtType[];
+}
+
+export interface StructuralPrimitiveSummary {
+  archetype: string;
+  effective_length_mm: number;
+  cross_section_area_mm2: number;
+  wall_thickness_mm: number;
+  applied_force_N: number;
+  applied_pressure_Pa: number;
+  support_condition: string;
+  stress_MPa: number;
+  required_strength_MPa: number;
+  required_E_GPa: number;
+  buckling_risk: boolean;
+  deflection_mm: number;
+  deflection_limit_mm: number;
+  governing_formula: string;
+  derivation: Record<string, unknown>;
+  warnings: string[];
+}
+
+export interface MlInputVector {
+  required_tensile_strength_MPa: number;
+  required_stiffness_GPa: number;
+  stiffness_dominated: boolean;
+  buckling_risk: boolean;
+  min_operating_temp_C: number;
+  max_operating_temp_C: number;
+  max_density_kg_m3: number;
+  fatigue_critical: boolean;
+  recyclability_priority: number;
+  governing_primitive?: string;
+  primitives?: StructuralPrimitiveSummary[];
+  derivation?: Record<string, unknown>;
+  warnings?: string[];
+}
+
+export interface FeaturePreview {
+  geometry: Record<string, unknown>;
+  load_estimate: LoadEstimate;
+  ml_input_vector: MlInputVector;
+  interpreted_features: Record<string, unknown>;
 }
 
 export interface PipelineError {
@@ -143,11 +204,10 @@ export interface PipelineError {
 }
 
 export interface AnalysisResult {
-  /** 'complete' | 'clarification_needed' | 'followup_answered' | 'error' */
+  /** 'complete' | 'followup_answered' | 'error' */
   status: string;
   session_id: string;
   report: ReportType | null;
-  clarification_question: string | null;
   followup_answer: string | null;
   warnings: string[];
   error: PipelineError | null;
@@ -156,15 +216,13 @@ export interface AnalysisResult {
 
 export interface TaskStatus {
   task_id: string;
-  /** 'pending' | 'running' | 'clarification_needed' | 'complete' | 'failed' */
-  status: "pending" | "running" | "clarification_needed" | "complete" | "failed";
+  /** 'pending' | 'running' | 'complete' | 'failed' */
+  status: "pending" | "running" | "complete" | "failed";
   /** Latest status message from the running pipeline node. */
   progress: string | null;
   /** Accumulated reasoning steps — append new items to the frontend display. */
   thoughts: ThoughtType[];
   result: AnalysisResult | null;
-  /** Populated when status='clarification_needed'. Show this to the user. */
-  clarification_question: string | null;
   /** Populated when status='failed'. */
   error: string | null;
 }
@@ -172,7 +230,7 @@ export interface TaskStatus {
 export interface AcceptedResponse {
   status: "accepted";
   task_id: string;
-  /** Store this — required for clarify, followup, and clearSession calls. */
+  /** Store this — required for followup and clearSession calls. */
   session_id: string;
   message: string;
 }
@@ -249,7 +307,8 @@ export const parseCadFile = async (file: File): Promise<CadParserPreview> => {
 export const continueAnalysis = async (
   uploadId: string,
   objectDescription: string,
-  recyclabilityPriority = 0.7
+  expectedLoadN?: number,
+  safetyFactor?: number
 ): Promise<AcceptedResponse> => {
   const response = await fetch(`${ANALYSIS_BASE}/continue`, {
     method: "POST",
@@ -257,7 +316,9 @@ export const continueAnalysis = async (
     body: JSON.stringify({
       upload_id: uploadId,
       object_description: objectDescription,
-      recyclability_priority: recyclabilityPriority,
+      recyclability_priority: 0.7,
+      expected_load_n: expectedLoadN,
+      safety_factor: safetyFactor,
     }),
   });
 
@@ -269,31 +330,47 @@ export const continueAnalysis = async (
   return response.json();
 };
 
-/**
- * Submit the user's answer to a clarification question.
- *
- * Call after polling returns a task with status='clarification_needed'.
- * Returns a new task_id to poll for the resumed pipeline's progress.
- *
- * @param sessionId           The session_id from the original startAnalysis() call.
- * @param clarificationAnswer The user's answer to the clarification question.
- */
-export const submitClarification = async (
-  sessionId: string,
-  clarificationAnswer: string
-): Promise<AcceptedResponse> => {
-  const response = await fetch(`${ANALYSIS_BASE}/clarify`, {
+export const previewFeatureTranslation = async (
+  uploadId: string,
+  objectDescription: string,
+  expectedLoadN: number,
+  safetyFactor: number
+): Promise<FeaturePreview> => {
+  const response = await fetch(`${ANALYSIS_BASE}/feature-preview`, {
     method: "POST",
     headers: await getHeaders(),
     body: JSON.stringify({
-      session_id: sessionId,
-      clarification_answer: clarificationAnswer,
+      upload_id: uploadId,
+      object_description: objectDescription,
+      expected_load_n: expectedLoadN,
+      safety_factor: safetyFactor,
     }),
   });
 
   if (!response.ok) {
     const detail = await _extractErrorDetail(response);
-    throw new Error(`Failed to submit clarification: ${detail}`);
+    throw new Error(`Failed to translate features: ${detail}`);
+  }
+
+  return response.json();
+};
+
+export const previewLoadAssumptions = async (
+  uploadId: string,
+  objectDescription: string
+): Promise<LoadPreview> => {
+  const response = await fetch(`${ANALYSIS_BASE}/load-preview`, {
+    method: "POST",
+    headers: await getHeaders(),
+    body: JSON.stringify({
+      upload_id: uploadId,
+      object_description: objectDescription,
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await _extractErrorDetail(response);
+    throw new Error(`Failed to infer load assumptions: ${detail}`);
   }
 
   return response.json();
@@ -353,7 +430,7 @@ export const pollTaskStatus = async (taskId: string): Promise<TaskStatus> => {
 };
 
 /**
- * Invalidate a session. Blocks future clarify/followup on this session_id.
+ * Invalidate a session. Blocks future followup on this session_id.
  * Task history remains readable via pollTaskStatus().
  *
  * @param sessionId The session_id to invalidate.
@@ -392,13 +469,6 @@ export interface PollingCallbacks {
   onComplete: (taskStatus: TaskStatus) => void;
 
   /**
-   * Fires when status='clarification_needed'.
-   * Show the question to the user, collect their answer, then call
-   * submitClarification() and startPolling() on the new task_id.
-   */
-  onClarification: (question: string, taskStatus: TaskStatus) => void;
-
-  /**
    * Fires when status='failed'.
    * error contains the AbortReason from the pipeline supervisor.
    */
@@ -408,21 +478,20 @@ export interface PollingCallbacks {
 /**
  * Start polling a task until it reaches a terminal state.
  *
- * Handles all terminal states (complete, failed, clarification_needed)
+ * Handles all terminal states (complete, failed)
  * and cleans up the interval automatically.
  *
  * Returns a cancel function — call it on component unmount or user navigation
  * to stop polling without waiting for a terminal state.
  *
- * @param taskId    The task_id returned by startAnalysis, submitClarification, or askFollowup.
- * @param callbacks Object with onUpdate, onComplete, onClarification, onError.
+ * @param taskId    The task_id returned by startAnalysis or askFollowup.
+ * @param callbacks Object with onUpdate, onComplete, onError.
  * @param intervalMs Polling interval in milliseconds. Default 1500.
  *
  * @example
  * const cancel = startPolling(task_id, {
  *   onUpdate: (s) => setProgress(s.progress),
  *   onComplete: (s) => setReport(s.result?.report),
- *   onClarification: (q, s) => setClarificationQuestion(q),
  *   onError: (e, s) => setError(e),
  * });
  * // In cleanup: cancel();
@@ -457,15 +526,6 @@ export const startPolling = (
           cancelled = true; // stop polling — terminal state
           break;
 
-        case "clarification_needed":
-          callbacks.onUpdate(taskStatus);
-          callbacks.onClarification(
-            taskStatus.clarification_question ?? "Could you provide more context?",
-            taskStatus
-          );
-          cancelled = true; // stop polling — caller takes over
-          break;
-
         case "failed":
           callbacks.onUpdate(taskStatus);
           callbacks.onError(
@@ -492,7 +552,6 @@ export const startPolling = (
             progress: null,
             thoughts: [],
             result: null,
-            clarification_question: null,
             error: "Connection lost",
           }
         );

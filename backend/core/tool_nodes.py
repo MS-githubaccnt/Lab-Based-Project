@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from tools.cad_parser_tools import parse_and_extract_cad_features
-from tools.feature_translation_tools import translate_features_to_ml_inputs
+from tools.files.translate_features_to_ml_inputs import translate_features_to_ml_inputs
 from schema.state import Thought
 from agents.supervisor.schemas import PipelineStage
 
@@ -136,6 +136,7 @@ class FeatureTranslationNode:
         stiffness = ml_input_vector.get("required_stiffness_GPa")
         dominated = ml_input_vector.get("stiffness_dominated", False)
         buckling  = ml_input_vector.get("buckling_risk", False)
+        governing = ml_input_vector.get("governing_primitive")
 
         if strength is not None:
             new_thoughts.append(_t(node, "result",
@@ -145,6 +146,10 @@ class FeatureTranslationNode:
             suffix = " [geometry-dominated — no material fully meets this]" if dominated else ""
             new_thoughts.append(_t(node, "result",
                 f"Required stiffness: {stiffness:.1f} GPa{suffix}"
+            ))
+        if governing:
+            new_thoughts.append(_t(node, "result",
+                f"Governing structural primitive: {str(governing).replace('_', ' ')}"
             ))
         if buckling:
             new_thoughts.append(_t(node, "warning",

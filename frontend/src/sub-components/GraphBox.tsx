@@ -3,7 +3,10 @@ import Plotly from 'plotly.js-dist-min';
 import { twMerge } from 'tailwind-merge';
 
 interface GraphBoxProps {
-  graphData: any;
+  graphData: {
+    data: Plotly.Data[];
+    layout?: Partial<Plotly.Layout>;
+  };
   className?: string;
 }
 
@@ -12,7 +15,7 @@ const GraphBox: React.FC<GraphBoxProps> = ({ graphData, className }) => {
 
   useEffect(() => {
     if (graphRef.current && graphData) {
-      const { data, layout } = graphData;
+      const { data, layout = {} } = graphData;
 
       // Deep merge for xaxis and yaxis if they exist in original layout
       const newLayout = {
@@ -54,4 +57,3 @@ const GraphBox: React.FC<GraphBoxProps> = ({ graphData, className }) => {
 };
 
 export default GraphBox;
-

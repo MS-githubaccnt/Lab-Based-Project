@@ -8,9 +8,6 @@ Public API
 process_request(...)
     Start a new pipeline run.
 
-resume_with_clarification(session_id, answer, ...)
-    Continue a run paused for clarification.
-
 ask_followup(session_id, question, ...)
     Ask a follow-up question about the completed recommendation.
     Handled exclusively by ExplanationNode — no pipeline re-run.
@@ -38,11 +35,7 @@ from langgraph.graph import END, StateGraph          # type: ignore
 
 from agents.explanation.node import ExplanationNode
 from agents.load_inference.node import LoadInferenceNode
-from .stub_nodes import (
-    ClarificationNode,
-    MLPredictorNode,
-    ReportAssemblyNode,
-)
+from .stub_nodes import MLPredictorNode, ReportAssemblyNode
 from .tool_nodes import CadParserNode, FeatureTranslationNode
 from schema.state import GraphState, PipelineResult, Thought
 from agents.supervisor.node import SupervisorNode
@@ -57,7 +50,6 @@ _NODE_STATUS: Dict[str, str] = {
     "supervisor":           "Analysing pipeline state...",
     "cad_parser":           "Parsing CAD file and extracting geometry...",
     "load_inference":       "Inferring load profile from object description...",
-    "clarification":        "Waiting for clarification...",
     "feature_translation":  "Deriving mechanical requirements...",
     "ml_predictor":         "Running material selection model...",
     "explanation":          "Generating recommendation explanation...",
@@ -84,7 +76,6 @@ class EcoMaterialOrchestrator:
         supervisor           = SupervisorNode()
         cad_parser           = CadParserNode()
         load_inference       = LoadInferenceNode()
-        clarification        = ClarificationNode()
         feature_translation  = FeatureTranslationNode()
         ml_predictor         = MLPredictorNode()
         explanation          = self._explanation_node
@@ -93,7 +84,6 @@ class EcoMaterialOrchestrator:
         workflow.add_node("supervisor",          supervisor.invoke)
         workflow.add_node("cad_parser",          cad_parser.invoke)
         workflow.add_node("load_inference",      load_inference.invoke)
-        workflow.add_node("clarification",       clarification.invoke)
         workflow.add_node("feature_translation", feature_translation.invoke)
         workflow.add_node("ml_predictor",        ml_predictor.invoke)
         workflow.add_node("explanation",         explanation.invoke)
@@ -108,7 +98,6 @@ class EcoMaterialOrchestrator:
             {
                 "cad_parser":          "cad_parser",
                 "load_inference":      "load_inference",
-                "clarification":       "clarification",
                 "feature_translation": "feature_translation",
                 "ml_predictor":        "ml_predictor",
                 "explanation":         "explanation",
@@ -119,18 +108,15 @@ class EcoMaterialOrchestrator:
 
         # All content nodes (except report_assembly) loop back to supervisor
         for name in [
-            "cad_parser", "load_inference", "clarification",
-            "feature_translation", "ml_predictor", "explanation",
+            "cad_parser", "load_inference", "feature_translation",
+            "ml_predictor", "explanation",
         ]:
             workflow.add_edge(name, "supervisor")
 
         # report_assembly goes straight to END — no quality gate needed
         workflow.add_edge("report_assembly", END)
 
-        return workflow.compile(
-            checkpointer=self._checkpointer,
-            interrupt_before=["clarification"],
-        )
+        return workflow.compile(checkpointer=self._checkpointer)
 
     # =======================================================================
     # Public API
@@ -142,6 +128,8 @@ class EcoMaterialOrchestrator:
         object_description: str,
         session_id: Optional[str] = None,
         recyclability_priority: float = 0.7,
+        expected_load_n: Optional[float] = None,
+        safety_factor: Optional[float] = None,
         progress_callback: ProgressCallback = None,
     ) -> PipelineResult:
         """
@@ -153,11 +141,12 @@ class EcoMaterialOrchestrator:
             session_id:             Optional. Auto-generated if not provided.
                                     Required for resume/followup calls.
             recyclability_priority: Eco weighting 0.0–1.0. Default 0.7.
+            expected_load_n:         Optional user-approved expected load in N.
+            safety_factor:           Optional user-approved factor of safety.
             progress_callback:      Optional async fn(node, status, thoughts).
 
         Returns:
-            PipelineResult with status 'complete', 'clarification_needed',
-            or 'error'.
+            PipelineResult with status 'complete' or 'error'.
         """
         if not 0.0 <= recyclability_priority <= 1.0:
             raise ValueError(
@@ -171,6 +160,8 @@ class EcoMaterialOrchestrator:
             "cad_file_path":          cad_file_path,
             "object_description":     object_description,
             "recyclability_priority": recyclability_priority,
+            "expected_load_n":         expected_load_n,
+            "safety_factor":           safety_factor,
             "pipeline_stage":         None,
             "supervisor_warnings":    [],
             "pipeline_error":         None,
@@ -181,33 +172,6 @@ class EcoMaterialOrchestrator:
         }
 
         final_state = await self._run_graph(initial_state, config, progress_callback)
-        return self._build_result(final_state, session_id)
-
-    async def resume_with_clarification(
-        self,
-        session_id: str,
-        clarification_answer: str,
-        progress_callback: ProgressCallback = None,
-    ) -> PipelineResult:
-        """
-        Resume a pipeline paused for clarification.
-
-        Args:
-            session_id:           From the original process_request() call.
-            clarification_answer: User's answer to the clarification question.
-            progress_callback:    Optional async fn(node, status, thoughts).
-
-        Returns:
-            PipelineResult — typically 'complete' or 'error'.
-        """
-        config = {"configurable": {"thread_id": session_id}}
-
-        self._graph.update_state(
-            config,
-            {"clarification_answer": clarification_answer},
-        )
-
-        final_state = await self._run_graph(None, config, progress_callback)
         return self._build_result(final_state, session_id)
 
     async def ask_followup(
@@ -349,20 +313,6 @@ class EcoMaterialOrchestrator:
                 status="error",
                 session_id=session_id,
                 error=state["pipeline_error"],
-                warnings=warnings,
-                thoughts=thoughts,
-            )
-
-        # Paused for clarification
-        if (
-            state.get("clarification_question")
-            and not state.get("clarification_answer")
-            and not state.get("report")
-        ):
-            return PipelineResult(
-                status="clarification_needed",
-                session_id=session_id,
-                clarification_question=state["clarification_question"],
                 warnings=warnings,
                 thoughts=thoughts,
             )

@@ -44,6 +44,8 @@ class GraphState(TypedDict, total=False):
     cad_file_path:           str
     object_description:      str
     recyclability_priority:  float
+    expected_load_n:         float
+    safety_factor:           float
 
     # ── Supervisor bookkeeping ────────────────────────────────────────────
     pipeline_stage:          str
@@ -67,8 +69,7 @@ class GraphState(TypedDict, total=False):
     # ── LoadInference outputs ─────────────────────────────────────────────
     load_estimate:           Optional[Dict[str, Any]]
     inference_confidence:    Optional[float]
-    clarification_question:  Optional[str]
-    clarification_answer:    Optional[str]
+    load_inference_hint:     Optional[str]
 
     # ── FeatureTranslation outputs ────────────────────────────────────────
     ml_input_vector:         Optional[Dict[str, Any]]
@@ -107,30 +108,23 @@ class GraphState(TypedDict, total=False):
 
 class PipelineResult:
     """
-    Return value from process_request(), resume_with_clarification(),
-    and ask_followup().
+    Return value from process_request() and ask_followup().
 
     status='complete'             -> report is populated
-    status='clarification_needed' -> clarification_question populated;
-                                     call resume_with_clarification()
     status='followup_answered'    -> followup_answer populated
     status='error'                -> error populated with AbortReason
     """
 
     __slots__ = (
         "status", "session_id", "report",
-        "clarification_question", "warnings", "error",
-        "followup_answer", "thoughts",
+        "warnings", "error", "followup_answer", "thoughts",
     )
 
     def __init__(
         self,
-        status: Literal[
-            "complete", "clarification_needed", "followup_answered", "error"
-        ],
+        status: Literal["complete", "followup_answered", "error"],
         session_id: str,
         report: Optional[Dict[str, Any]] = None,
-        clarification_question: Optional[str] = None,
         followup_answer: Optional[str] = None,
         warnings: Optional[List[str]] = None,
         error: Optional[Dict[str, Any]] = None,
@@ -139,7 +133,6 @@ class PipelineResult:
         self.status                 = status
         self.session_id             = session_id
         self.report                 = report
-        self.clarification_question = clarification_question
         self.followup_answer        = followup_answer
         self.warnings               = warnings or []
         self.error                  = error
@@ -150,7 +143,6 @@ class PipelineResult:
             "status":                 self.status,
             "session_id":             self.session_id,
             "report":                 self.report,
-            "clarification_question": self.clarification_question,
             "followup_answer":        self.followup_answer,
             "warnings":               self.warnings,
             "error":                  self.error,

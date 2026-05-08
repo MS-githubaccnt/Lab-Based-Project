@@ -35,13 +35,13 @@ class StartAnalysisRequest(BaseModel):
     Payload for POST /api/v1/analysis/start.
 
     session_id is optional — the server generates one if absent and echoes
-    it back in the response. The frontend must store it for clarify/followup.
+    it back in the response. The frontend must store it for follow-up calls.
     """
     session_id: Optional[str] = Field(
         default=None,
         description=(
             "Optional session identifier. Generated server-side if not provided. "
-            "Store this value — it is required for clarify and follow-up calls."
+            "Store this value — it is required for follow-up calls."
         ),
     )
     cad_file_path: str = Field(
@@ -93,29 +93,6 @@ class StartAnalysisRequest(BaseModel):
         return v.strip()
 
 
-class ClarifyRequest(BaseModel):
-    """
-    Payload for POST /api/v1/analysis/clarify.
-    Submitted when the user answers the clarification question shown after
-    a task reaches status='clarification_needed'.
-    """
-    session_id: str = Field(
-        description="The session_id returned by the original start call.",
-    )
-    clarification_answer: str = Field(
-        min_length=1,
-        max_length=1000,
-        description="The user's answer to the clarification question.",
-    )
-
-    @field_validator("clarification_answer")
-    @classmethod
-    def answer_not_blank(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("clarification_answer must not be blank.")
-        return v.strip()
-
-
 class FollowupRequest(BaseModel):
     """
     Payload for POST /api/v1/analysis/followup.
@@ -155,10 +132,76 @@ class ContinueAnalysisRequest(BaseModel):
         description="Plain-language description of the part.",
     )
     recyclability_priority: float = Field(default=0.7, ge=0.0, le=1.0)
+    expected_load_n: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="User-approved expected operating load in Newtons.",
+    )
+    safety_factor: Optional[float] = Field(
+        default=None,
+        ge=1.0,
+        description="User-approved factor of safety.",
+    )
 
     @field_validator("object_description")
     @classmethod
     def continue_description_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("object_description must not be blank.")
+        return v.strip()
+
+
+class LoadPreviewRequest(BaseModel):
+    """
+    Payload for POST /api/v1/analysis/load-preview.
+    Runs CAD parsing + LoadInferenceNode only, so the frontend can let the
+    user review and edit expected load assumptions before material selection.
+    """
+    upload_id: str = Field(
+        min_length=1,
+        description="Identifier returned by POST /api/v1/analysis/parse.",
+    )
+    object_description: str = Field(
+        min_length=3,
+        max_length=500,
+        description="Plain-language description of the part.",
+    )
+
+    @field_validator("object_description")
+    @classmethod
+    def preview_description_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("object_description must not be blank.")
+        return v.strip()
+
+
+class FeaturePreviewRequest(BaseModel):
+    """
+    Payload for POST /api/v1/analysis/feature-preview.
+    Runs LoadInferenceNode with user-approved overrides, then runs the
+    feature translator so the frontend can preview interpreted requirements.
+    """
+    upload_id: str = Field(
+        min_length=1,
+        description="Identifier returned by POST /api/v1/analysis/parse.",
+    )
+    object_description: str = Field(
+        min_length=3,
+        max_length=500,
+        description="Plain-language description of the part.",
+    )
+    expected_load_n: float = Field(
+        ge=0.0,
+        description="User-approved expected operating load in Newtons.",
+    )
+    safety_factor: float = Field(
+        ge=1.0,
+        description="User-approved factor of safety.",
+    )
+
+    @field_validator("object_description")
+    @classmethod
+    def feature_description_not_blank(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("object_description must not be blank.")
         return v.strip()
@@ -170,7 +213,7 @@ class ContinueAnalysisRequest(BaseModel):
 
 class AcceptedResponse(BaseModel):
     """
-    Returned immediately by start, clarify, and followup routes.
+    Returned immediately by start and followup routes.
     The frontend uses task_id to poll /status/{task_id}.
     session_id is echoed back so the frontend can store it for future calls.
     """
@@ -178,7 +221,7 @@ class AcceptedResponse(BaseModel):
     task_id: str = Field(description="Poll /status/{task_id} to track progress.")
     session_id: str = Field(
         description=(
-            "Store this for clarify and followup calls. "
+            "Store this for followup calls. "
             "Matches the session_id in the request, or server-generated if absent."
         )
     )
@@ -188,19 +231,16 @@ class AcceptedResponse(BaseModel):
 class TaskStatusResponse(BaseModel):
     """
     Returned by GET /status/{task_id}.
-    The frontend polls this endpoint until status is 'complete', 'failed',
-    or 'clarification_needed'.
+    The frontend polls this endpoint until status is 'complete' or 'failed'.
 
     status values:
       pending              — task created, background job not yet started
       running              — pipeline is executing
-      clarification_needed — pipeline paused; show clarification_question to user
-                             then POST to /clarify with the answer
       complete             — result is populated; render the report
       failed               — error is populated; show error to user
     """
     task_id: str
-    status: str = Field(description="pending | running | clarification_needed | complete | failed")
+    status: str = Field(description="pending | running | complete | failed")
     progress: Optional[str] = Field(
         default=None,
         description="Latest status message from the running pipeline node.",
@@ -215,14 +255,6 @@ class TaskStatusResponse(BaseModel):
     result: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Full PipelineResult dict. Populated when status='complete'.",
-    )
-    clarification_question: Optional[str] = Field(
-        default=None,
-        description=(
-            "Question to show the user. "
-            "Populated when status='clarification_needed'. "
-            "Submit the user's answer to POST /clarify."
-        ),
     )
     error: Optional[str] = Field(
         default=None,

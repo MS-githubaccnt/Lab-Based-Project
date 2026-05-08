@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List
 
 from .prompt_builder import LoadInferencePromptBuilder
-from .schemas import CONFIDENCE_THRESHOLD, LoadEstimate
+from .schemas import LoadEstimate
 from agents.base_agent import BaseAgentNode
 from agents.supervisor.schemas import PipelineStage
 from schema.state import Thought
@@ -20,12 +20,13 @@ class LoadInferenceNode(BaseAgentNode):
     Agent node that infers a mechanical load profile from:
       - GraphState["object_description"]  — user's plain-language part name
       - GraphState["geometry"]            — GeometryFeatures dict from cad_parser
-      - GraphState["clarification_answer"] — optional user reply (second pass)
+      - GraphState["load_inference_hint"] — optional supervisor retry guidance
+      - GraphState["expected_load_n"]     — optional user-approved load override
+      - GraphState["safety_factor"]       — optional user-approved safety factor
 
     Writes to GraphState:
       - load_estimate            : LoadEstimate dict
       - inference_confidence     : float  (used by the conditional edge)
-      - clarification_question   : str | None
     """
 
     def __init__(
@@ -47,18 +48,20 @@ class LoadInferenceNode(BaseAgentNode):
             state: Full GraphState dict. Must contain:
                    "object_description" (str)
                    "geometry" (dict, output of cad_parser node)
-                   Optionally: "clarification_answer" (str)
+                   Optionally: "load_inference_hint" (str),
+                   "expected_load_n" (float), "safety_factor" (float)
 
         Returns:
             State delta dict with keys:
                 load_estimate          : dict (LoadEstimate serialised)
                 inference_confidence   : float
-                clarification_question : str | None
         """
         # ── Read from state ───────────────────────────────────────────────
         object_description = self._require(state, "object_description", str)
         geometry           = self._require(state, "geometry", dict)
-        clarification      = state.get("clarification_answer")  # may be None
+        inference_hint     = state.get("load_inference_hint")  # may be None
+        expected_load_n    = state.get("expected_load_n")
+        safety_factor      = state.get("safety_factor")
         
         existing_thoughts = list(state.get("thoughts") or [])
         node = "load_inference"
@@ -70,7 +73,7 @@ class LoadInferenceNode(BaseAgentNode):
         user_message = LoadInferencePromptBuilder.build_user_message(
             object_description=object_description,
             geometry=geometry,
-            clarification_answer=clarification,
+            inference_hint=inference_hint,
         )
 
         messages = [{"role": "user", "content": user_message}]
@@ -84,13 +87,31 @@ class LoadInferenceNode(BaseAgentNode):
             response_model=LoadEstimate,
         )
 
+        estimate_data = estimate.model_dump(mode="json")
+        override_notes: List[str] = []
+
+        if expected_load_n is not None:
+            load_value = max(0.0, float(expected_load_n))
+            estimate_data["magnitude_range_N"] = [load_value, load_value]
+            override_notes.append(f"expected load set to {load_value:,.0f} N")
+
+        if safety_factor is not None:
+            sf_value = max(1.0, float(safety_factor))
+            estimate_data["safety_factor"] = round(sf_value, 2)
+            override_notes.append(f"factor of safety set to {sf_value:.2f}")
+
         # ── Return state delta ────────────────────────────────────────────
         new_thoughts.append(Thought(node=node, type="result", text="Load inference complete."))
+        if override_notes:
+            new_thoughts.append(Thought(
+                node=node,
+                type="info",
+                text="Applied user load assumptions: " + ", ".join(override_notes) + ".",
+            ))
         
         return {
-            "load_estimate":          estimate.model_dump(mode="json"),
-            "inference_confidence":   estimate.confidence,
-            "clarification_question": estimate.clarification_question,
+            "load_estimate":          estimate_data,
+            "inference_confidence":   estimate_data["confidence"],
             "pipeline_stage":         PipelineStage.LOAD_INFERENCE,
             "thoughts":               existing_thoughts + new_thoughts,
         }

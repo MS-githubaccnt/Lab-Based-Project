@@ -23,7 +23,6 @@ from pydantic import BaseModel, Field
 class PipelineStage:
     CAD_PARSER          = "cad_parser"
     LOAD_INFERENCE      = "load_inference"
-    CLARIFICATION       = "clarification"
     FEATURE_TRANSLATION = "feature_translation"
     ML_PREDICTOR        = "ml_predictor"
     EXPLANATION         = "explanation"
@@ -37,7 +36,6 @@ class PipelineStage:
 class NextNode:
     CAD_PARSER          = "cad_parser"
     LOAD_INFERENCE      = "load_inference"
-    CLARIFICATION       = "clarification"
     FEATURE_TRANSLATION = "feature_translation"
     ML_PREDICTOR        = "ml_predictor"
     EXPLANATION         = "explanation"

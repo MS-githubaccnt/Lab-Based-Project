@@ -22,7 +22,6 @@ analysis and materials selection. Your task is to infer the mechanical load \
 profile for an engineering part given:
   1. A plain-language description of what the object is
   2. Key geometric features extracted from its CAD file
-  3. Optionally, a clarifying answer the user has provided
 
 You will produce a structured LoadEstimate that will be used downstream to \
 derive required material properties (strength, stiffness, temperature range) \
@@ -41,8 +40,6 @@ is_fatigue_critical — true if >10,000 cycles AND safety-critical
 deflection_category — "precision" | "structural" | "mechanical" | "flexible"
 confidence          — 0.0–1.0 (see calibration rules below)
 reasoning           — 2–4 sentences explaining your inference
-clarification_question — null if confidence ≥ 0.75, one question otherwise
-
 ━━━ REASONING APPROACH ━━━
 
 Follow this reasoning chain:
@@ -60,7 +57,7 @@ Follow this reasoning chain:
 
 ━━━ CONFIDENCE CALIBRATION ━━━
 
-Set confidence BELOW 0.75 (and populate clarification_question) when:
+Set confidence BELOW 0.75 when:
   — The description is generic: "bracket", "part", "arm", "housing" with no
     industry or function context
   — The load could span >1 order of magnitude depending on application
@@ -76,27 +73,20 @@ Set confidence above 0.85 only for well-specified, function-clear objects:
 "bicycle crank arm", "M8 bolt in shear", "automotive door hinge",
 "drone motor mount".
 
-━━━ CLARIFICATION QUESTIONS ━━━
-
-When asking a clarification question:
-  — Ask the SINGLE question that most reduces uncertainty
-  — Make it answerable in one sentence
-  — Do not ask for numbers unless the user is an engineer
-  — Prefer functional questions: "Is this load-bearing or decorative?"
-    over technical ones: "What is the Von Mises stress?"
-
 ━━━ UNITS & CONVENTIONS ━━━
 
   — Forces in Newtons (N)
   — Temperatures in Celsius (°C)
   — Geometry inputs are in millimetres (mm)
-  — Do NOT convert units — output exactly as specified above"""
+  — Do NOT convert units — output exactly as specified above
+  — Do NOT ask the user follow-up questions; make conservative,
+    clearly stated assumptions instead."""
 
     @staticmethod
     def build_user_message(
         object_description: str,
         geometry: Dict[str, Any],
-        clarification_answer: Optional[str] = None,
+        inference_hint: Optional[str] = None,
     ) -> str:
         """
         Build the per-call user message.
@@ -110,9 +100,8 @@ When asking a clarification question:
                 We extract the most structurally relevant fields here —
                 passing the full dict would include noise (triangle count,
                 centroid, etc.) that doesn't help load inference.
-            clarification_answer:
-                The user's reply to a previous clarification question, if any.
-                None on the first invocation.
+            inference_hint:
+                Optional supervisor-provided retry guidance.
 
         Returns:
             A formatted string ready to use as the 'user' role message.
@@ -125,12 +114,12 @@ When asking a clarification question:
 
         lines += ["## Geometry (from CAD)", geo_summary, ""]
 
-        if clarification_answer:
+        if inference_hint:
             lines += [
-                "## User clarification",
-                f"The user answered: {clarification_answer.strip()}",
+                "## Inference hint",
+                inference_hint.strip(),
                 "",
-                "Incorporate this answer to refine your load estimate. "
+                "Use this guidance to refine your load estimate. "
                 "Your confidence should now be ≥ 0.75 unless the answer "
                 "itself introduces new ambiguity.",
                 "",

@@ -1,8 +1,8 @@
 """
 nodes/stub_nodes.py
 --------------------
-Wire-compatible stubs for ClarificationNode, MLPredictorNode,
-and ReportAssemblyNode. Each emits thoughts so the frontend
+Wire-compatible stubs for MLPredictorNode and ReportAssemblyNode.
+Each emits thoughts so the frontend
 receives reasoning steps even from stub implementations.
 
 Replace each stub with the real implementation when ready.
@@ -12,28 +12,30 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from pydantic import BaseModel, Field
 from schema.state import Thought
 from agents.supervisor.schemas import PipelineStage
+from llm.llm_client import GroqLLMClient
 
 
 def _t(node: str, type_: str, text: str) -> Thought:
     return Thought(node=node, type=type_, text=text)
 
 
-class ClarificationNode:
-    """
-    Human-in-loop pause. The real implementation relies on
-    interrupt_before=['clarification'] in the compiled graph.
-    By the time invoke() runs, clarification_answer is already in state.
-    """
+class MaterialDescription(BaseModel):
+    material_name: str = Field(description="The exact material name from the provided candidates.")
+    description: str = Field(
+        description=(
+            "A short, engineer-facing description of why this material is relevant "
+            "for the part. Must be one or two concise sentences."
+        )
+    )
 
-    async def invoke(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        existing = list(state.get("thoughts") or [])
-        return {
-            "thoughts":       existing + [_t("clarification", "info",
-                "User clarification received — refining load estimate...")],
-            "pipeline_stage": PipelineStage.CLARIFICATION,
-        }
+
+class MaterialDescriptionResponse(BaseModel):
+    descriptions: List[MaterialDescription] = Field(
+        description="One description for each supplied material candidate."
+    )
 
 
 class MLPredictorNode:
@@ -90,19 +92,45 @@ class MLPredictorNode:
                 confidence = 0.0
                 new_thoughts.append(_t(node, "warning", f"Model prediction error: {e}"))
 
-        # Model only provides material_name based on input snippet
-        predictions = [{
-            "material_name":           pred_material,
-           # "eco_score":               0.80, # Stub eco score
-            "confidence":              confidence,
-            "predicted_strength_MPa":  None,
-            "predicted_stiffness_GPa": None,
-        }]
+        class_labels = list(getattr(self.le, "classes_", []))
+        if "probas" in locals() and class_labels:
+            ranked = sorted(
+                zip(class_labels, probas),
+                key=lambda item: float(item[1]),
+                reverse=True,
+            )[:3]
+        else:
+            ranked = [(pred_material, confidence)]
+
+        predictions = []
+        for material_name, score in ranked:
+            score = float(score)
+            predictions.append({
+                "material_name":           str(material_name),
+                "eco_score":               score,
+                "confidence":              score,
+                "predicted_strength_MPa":  ml_input.get("required_tensile_strength_MPa"),
+                "predicted_stiffness_GPa": ml_input.get("required_stiffness_GPa"),
+                "description":             "",
+            })
+
+        descriptions = await _generate_material_descriptions(
+            object_description=state.get("object_description", "the uploaded part"),
+            load_estimate=state.get("load_estimate") or {},
+            ml_input=ml_input,
+            predictions=predictions,
+        )
+        for prediction in predictions:
+            material_name = prediction.get("material_name", "")
+            prediction["description"] = descriptions.get(
+                material_name,
+                _fallback_material_description(prediction),
+            )
 
         for i, p in enumerate(predictions, 1):
             new_thoughts.append(_t(node, "result",
                 f"#{i}: {p['material_name']} "
-                # f"(eco {p['eco_score']:.2f} | conf {p['confidence']:.2f})"
+                f"(score {p['confidence']:.2f})"
             ))
 
         return {
@@ -146,7 +174,6 @@ class ReportAssemblyNode:
                 )
             },
             "inference_confidence": state.get("inference_confidence"),
-            "clarification_used":   state.get("clarification_answer") is not None,
             "warnings":             warnings,
             "all_thoughts":         existing,  # full reasoning trace in the report
         }
@@ -164,3 +191,100 @@ class ReportAssemblyNode:
             "thoughts":       existing + new_thoughts,
             "pipeline_stage": "report_assembly",
         }
+
+
+async def _generate_material_descriptions(
+    object_description: str,
+    load_estimate: Dict[str, Any],
+    ml_input: Dict[str, Any],
+    predictions: List[Dict[str, Any]],
+) -> Dict[str, str]:
+    if not predictions:
+        return {}
+
+    fallback = {
+        prediction.get("material_name", ""): _fallback_material_description(prediction)
+        for prediction in predictions
+    }
+
+    try:
+        llm = GroqLLMClient(
+            model="llama-3.3-70b-versatile",
+            temperature=0.2,
+            system_prompt=(
+                "You write concise engineering material descriptions. "
+                "Do not invent exact properties that were not provided. "
+                "Return practical, non-marketing language."
+            ),
+        )
+        response = await llm.generate(
+            messages=[{
+                "role": "user",
+                "content": _build_description_prompt(
+                    object_description=object_description,
+                    load_estimate=load_estimate,
+                    ml_input=ml_input,
+                    predictions=predictions,
+                ),
+            }],
+            response_model=MaterialDescriptionResponse,
+        )
+    except Exception:
+        return fallback
+
+    descriptions = dict(fallback)
+    material_names_by_key = {
+        str(prediction.get("material_name", "")).strip().lower(): str(prediction.get("material_name", "")).strip()
+        for prediction in predictions
+    }
+    for item in response.descriptions:
+        name = item.material_name.strip()
+        description = item.description.strip()
+        if name and description:
+            canonical_name = material_names_by_key.get(name.lower(), name)
+            descriptions[canonical_name] = description
+
+    return descriptions
+
+
+def _build_description_prompt(
+    object_description: str,
+    load_estimate: Dict[str, Any],
+    ml_input: Dict[str, Any],
+    predictions: List[Dict[str, Any]],
+) -> str:
+    candidate_lines = []
+    for index, prediction in enumerate(predictions[:3], 1):
+        candidate_lines.append(
+            "- "
+            f"rank {index}: {prediction.get('material_name', 'Unknown')} | "
+            f"score={prediction.get('confidence', 'unknown')} | "
+            f"required_strength_MPa={prediction.get('predicted_strength_MPa', 'unknown')} | "
+            f"required_stiffness_GPa={prediction.get('predicted_stiffness_GPa', 'unknown')}"
+        )
+
+    return (
+        "Generate a short dropdown description for each of the top material candidates.\n"
+        "Keep each description to one or two sentences. Explain why the material is a relevant candidate "
+        "for the part and mention any tradeoff only if it follows from the provided context.\n\n"
+        f"Part: {object_description}\n"
+        f"Load type: {load_estimate.get('load_type', 'unknown')}\n"
+        f"Primary stress mode: {load_estimate.get('primary_stress_mode', 'unknown')}\n"
+        f"Expected safety factor: {load_estimate.get('safety_factor', 'unknown')}\n"
+        f"Required tensile strength MPa: {ml_input.get('required_tensile_strength_MPa', 'unknown')}\n"
+        f"Required stiffness GPa: {ml_input.get('required_stiffness_GPa', 'unknown')}\n"
+        f"Buckling risk: {ml_input.get('buckling_risk', 'unknown')}\n"
+        f"Fatigue critical: {ml_input.get('fatigue_critical', 'unknown')}\n\n"
+        "Candidates:\n"
+        + "\n".join(candidate_lines)
+    )
+
+
+def _fallback_material_description(prediction: Dict[str, Any]) -> str:
+    material_name = prediction.get("material_name", "This material")
+    score = prediction.get("confidence")
+    score_text = f" with a model score of {score:.2f}" if isinstance(score, float) else ""
+    return (
+        f"{material_name} is a candidate match{score_text} for the translated load "
+        "and geometry requirements. Review detailed material datasheets before final selection."
+    )

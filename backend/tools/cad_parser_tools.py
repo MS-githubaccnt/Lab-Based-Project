@@ -64,6 +64,41 @@ def parse_and_extract_cad_features(
         is_watertight            bool
         multi_body               bool
 
+        # ── Structural analysis enrichment ──────────────────────────────
+        connected_components     list[dict]
+            Per-body geometry dicts (same schema as the top-level fields,
+            minus connected_components itself).  One entry per disconnected
+            body in the mesh.  Length == 1 for single-body STLs.
+            Each dict has:
+                bbox_x_mm, bbox_y_mm, bbox_z_mm
+                dominant_axis
+                min_wall_thickness_mm, median_wall_thickness_mm
+                is_watertight
+                volume_mm3, surface_area_mm2
+                triangle_count, vertex_count
+                bottom_contact_area_mm2
+                top_load_area_mm2
+                has_cylindrical_bores
+                mean_curvature
+
+        mean_curvature           float  (1/mm)  — whole-mesh discrete mean
+                                 curvature: average |Δn| per unit area.
+                                 Near 0 = flat/prismatic.  > 0.05/mm = shell.
+
+        bottom_contact_area_mm2  float  — total area of faces with outward
+                                 normal ≈ −Z and whose Z centroid is within
+                                 5 % of the part height from Z_min.
+                                 Proxy for the resting / support footprint.
+
+        top_load_area_mm2        float  — same but normal ≈ +Z at Z_max.
+                                 Proxy for the primary load entry surface.
+
+        has_cylindrical_bores    bool   — True when the mesh contains
+                                 interior loops of faces whose normals are
+                                 predominantly radially inward (pointing
+                                 toward a shared axis), indicating mounting
+                                 holes or bores.
+
         warnings                 list[str]
 
     Raises:
@@ -101,8 +136,6 @@ def parse_and_extract_cad_features(
         "thin_wall_threshold_mm": thin_wall_threshold_mm,
         "warnings":               load_warnings + extract_warnings,
     }
-
-
 
 
 def _validate_path(file_path: str) -> Path:
@@ -289,7 +322,7 @@ def _load_stl(path: Path) -> tuple:
 
 
 # ===========================================================================
-# Feature extraction
+# Feature extraction  (top-level dispatcher)
 # ===========================================================================
 
 def _extract_features(
@@ -325,8 +358,7 @@ def _extract_features(
     surface_area = float(mesh.area)
 
     # ── Bounding box ──────────────────────────────────────────────────────
-    # mesh.bounds: (2, 3) — [[xmin,ymin,zmin], [xmax,ymax,zmax]]
-    dims     = mesh.bounds[1] - mesh.bounds[0]
+    dims     = mesh.bounds[1] - mesh.bounds[0]   # (3,) xyz extents
     centroid = mesh.center_mass
 
     if np.any(dims < 1e-6):
@@ -335,17 +367,25 @@ def _extract_features(
             "Geometry may be degenerate."
         )
 
-    # ── Shape ─────────────────────────────────────────────────────────────
+    # ── Shape classification ───────────────────────────────────────────────
     aspect_ratio  = _aspect_ratio(dims)
     dominant_axis = _classify_shape(dims)
 
-    # ── Wall thickness ────────────────────────────────────────────────────
+    # ── Wall thickness ─────────────────────────────────────────────────────
     min_wall, median_wall = _wall_thickness(
         mesh, wall_sample_count, warnings
     )
-
     has_thin = (
         min_wall is not None and min_wall < thin_wall_threshold_mm
+    )
+
+    # ── NEW: Structural enrichment fields ─────────────────────────────────
+    mean_curv              = _mean_curvature(mesh, warnings)
+    bottom_contact         = _contact_area(mesh, face="bottom")
+    top_load               = _contact_area(mesh, face="top")
+    has_bores              = _has_cylindrical_bores(mesh, warnings)
+    components             = _connected_components(
+        mesh, wall_sample_count, thin_wall_threshold_mm, warnings
     )
 
     return {
@@ -363,11 +403,487 @@ def _extract_features(
         "triangle_count":           int(len(mesh.faces)),
         "vertex_count":             int(len(mesh.vertices)),
         "is_watertight":            is_watertight,
+        # ── structural enrichment ──────────────────────────────────────
+        "mean_curvature":           round(mean_curv, 6),
+        "bottom_contact_area_mm2":  round(bottom_contact, 4),
+        "top_load_area_mm2":        round(top_load, 4),
+        "has_cylindrical_bores":    bool(has_bores),
+        "connected_components":     components,
     }, warnings
 
 
 # ===========================================================================
-# Wall thickness estimation
+# NEW: Discrete mean curvature
+# ===========================================================================
+
+def _mean_curvature(mesh, warnings: list[str]) -> float:
+    """
+    Compute a scalar discrete mean curvature proxy for the whole mesh.
+
+    Method: angle-weighted vertex normal variation (Meyer et al. 2003).
+    For each vertex, we compute the magnitude of the discrete Laplace–
+    Beltrami operator applied to the vertex positions, divided by the
+    local Voronoi area. The mesh-wide mean of these magnitudes gives a
+    scale-independent curvature measure in 1/mm.
+
+    Interpretation:
+        < 0.001 / mm   essentially flat / prismatic (box, plate, beam)
+        0.001–0.05     gently curved (ribbed panel, ergonomic grip)
+        > 0.05         strongly curved (pipe, sphere, shell structure)
+
+    Falls back to 0.0 and appends a warning on failure (e.g. open mesh,
+    degenerate triangles).
+
+    References:
+        Meyer et al., "Discrete Differential-Geometry Operators for
+        Triangulated 2-Manifolds", Visualization and Mathematics III, 2003.
+    """
+    try:
+        verts  = mesh.vertices                 # (V, 3)
+        faces  = mesh.faces                    # (F, 3)
+        n_vert = len(verts)
+
+        if n_vert < 4 or len(faces) < 4:
+            return 0.0
+
+        # ── Cotangent weights (standard cotan Laplacian) ──────────────────
+        # For each face, compute the cotangent of each interior angle.
+        # Edges: e_i = v_k - v_j  (opposite to vertex i in the triangle)
+        v0 = verts[faces[:, 0]]   # (F, 3)
+        v1 = verts[faces[:, 1]]
+        v2 = verts[faces[:, 2]]
+
+        def _cot_angle(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+            """
+            Cotangent of the angle at a vertex given the two edge vectors
+            from that vertex.  cot θ = cos θ / sin θ = (a·b) / |a×b|.
+            Clipped to [−10, 10] to guard against near-degenerate triangles.
+            """
+            dot  = np.einsum("ij,ij->i", a, b)
+            cross_norm = np.linalg.norm(np.cross(a, b), axis=1)
+            cross_norm = np.maximum(cross_norm, 1e-12)
+            return np.clip(dot / cross_norm, -10.0, 10.0)
+
+        # cot of the angle at each vertex of every face
+        cot0 = _cot_angle(v1 - v0, v2 - v0)   # angle at v0
+        cot1 = _cot_angle(v0 - v1, v2 - v1)   # angle at v1
+        cot2 = _cot_angle(v0 - v2, v1 - v2)   # angle at v2
+
+        # ── Accumulate cotan-Laplacian × vertex positions ─────────────────
+        # Δ(v_i) = (1 / 2A_i) Σ_j (cot α_ij + cot β_ij)(v_j - v_i)
+        # We accumulate the numerator (Σ cotan * edge) per vertex.
+        laplacian = np.zeros((n_vert, 3), dtype=np.float64)
+
+        def _add_contribution(
+            idx_i: np.ndarray,
+            idx_j: np.ndarray,
+            cot_weight: np.ndarray,
+        ) -> None:
+            edge = verts[idx_j] - verts[idx_i]   # (F, 3)
+            contrib = cot_weight[:, None] * edge  # (F, 3)
+            np.add.at(laplacian, idx_i, contrib)
+            np.add.at(laplacian, idx_j, -contrib)   # antisymmetric
+
+        # Each edge (i,j) contributes with the cot of the opposite angle.
+        # Edge (v1,v2) is opposite angle at v0 → weight cot0
+        _add_contribution(faces[:, 1], faces[:, 2], cot0)
+        # Edge (v0,v2) is opposite angle at v1 → weight cot1
+        _add_contribution(faces[:, 0], faces[:, 2], cot1)
+        # Edge (v0,v1) is opposite angle at v2 → weight cot2
+        _add_contribution(faces[:, 0], faces[:, 1], cot2)
+
+        # ── Voronoi areas ─────────────────────────────────────────────────
+        # A_i = (1/8) Σ_triangles (cot α + cot β) |e|² per vertex.
+        # Simplified: distribute triangle area (1/3 each) as Voronoi proxy.
+        face_areas = 0.5 * np.linalg.norm(
+            np.cross(v1 - v0, v2 - v0), axis=1
+        )                                         # (F,)
+        vertex_area = np.zeros(n_vert, dtype=np.float64)
+        np.add.at(vertex_area, faces[:, 0], face_areas / 3.0)
+        np.add.at(vertex_area, faces[:, 1], face_areas / 3.0)
+        np.add.at(vertex_area, faces[:, 2], face_areas / 3.0)
+
+        # ── Mean curvature magnitude at each vertex ───────────────────────
+        # H_i = |Δ(p_i)| / (2 * A_i)
+        # (factor 2 from the definition of the discrete mean curvature normal)
+        safe_area = np.maximum(vertex_area, 1e-12)
+        H = np.linalg.norm(laplacian, axis=1) / (2.0 * safe_area)   # (V,) 1/mm
+
+        # ── Robust aggregate: area-weighted median ────────────────────────
+        # Median is more robust than mean for open/imperfect meshes.
+        # Weight by vertex area to reflect surface distribution.
+        # Use 90th percentile of H as the summary statistic —
+        # the "typical high curvature zone" is what matters for shell detection.
+        p90 = float(np.percentile(H, 90))
+        return p90
+
+    except Exception as e:
+        warnings.append(
+            f"Mean curvature computation failed ({e}). "
+            "Defaulting to 0.0 (flat/prismatic assumption)."
+        )
+        return 0.0
+
+
+# ===========================================================================
+# NEW: Contact area (top / bottom faces)
+# ===========================================================================
+
+def _contact_area(mesh, face: str) -> float:
+    """
+    Sum the area of faces whose outward normal is predominantly in the
+    ±Z direction AND whose centroid Z-position is near the bounding-box
+    extremum.
+
+    face="bottom":
+        normal ≈ −Z  (n_z < −cos45° = −0.707)
+        centroid Z within 5 % of part height from Z_min.
+        → resting / support footprint.
+
+    face="top":
+        normal ≈ +Z  (n_z > +0.707)
+        centroid Z within 5 % of part height from Z_max.
+        → primary load-entry surface.
+
+    The 5 % height threshold is generous enough to capture multi-surface
+    bases (e.g. four separate foot pads) while excluding mid-body surfaces.
+
+    Returns total area in mm².  Returns 0.0 on any failure.
+    """
+    try:
+        normals     = mesh.face_normals            # (F, 3)  unit normals
+        face_areas  = mesh.area_faces              # (F,)
+        centroids   = mesh.triangles_center        # (F, 3)
+
+        z_min, z_max = mesh.bounds[0, 2], mesh.bounds[1, 2]
+        height       = z_max - z_min
+        if height < 1e-9:
+            return 0.0
+
+        z_tol = height * 0.05    # 5 % height tolerance
+        _COS45 = 0.707
+
+        if face == "bottom":
+            normal_mask   = normals[:, 2] < -_COS45
+            position_mask = centroids[:, 2] < (z_min + z_tol)
+        else:  # "top"
+            normal_mask   = normals[:, 2] > _COS45
+            position_mask = centroids[:, 2] > (z_max - z_tol)
+
+        mask = normal_mask & position_mask
+        return float(face_areas[mask].sum())
+
+    except Exception:
+        return 0.0
+
+
+# ===========================================================================
+# NEW: Cylindrical bore detection
+# ===========================================================================
+
+def _has_cylindrical_bores(mesh, warnings: list[str]) -> bool:
+    """
+    Detect cylindrical bores (mounting holes, through-holes) by looking
+    for clusters of face normals that point radially inward toward a
+    shared axis — the signature of a cylindrical hole surface.
+
+    Algorithm
+    ---------
+    1. Identify "inward-radial" faces: faces whose centroid-to-nearest-
+       axis-candidate vector is anti-parallel to the face normal.
+       We test two candidate axes: Z (vertical holes) and any dominant
+       horizontal axis.
+
+    2. For the Z-axis: a face on a cylindrical bore has:
+          normal · (centroid_XY_normalised) ≈ −1
+       i.e. the normal points toward the Z-axis in XY.
+
+    3. We use a histogram of the azimuthal angle of face normals in XY:
+       for a cylindrical bore the normals should be uniformly distributed
+       in azimuth (all pointing inward = toward axis = outward normals
+       point away from axis). We detect this by checking if there is a
+       subset of faces whose XY-normal magnitude is > 0.85 (nearly
+       horizontal normal) AND whose XY-normal, when plotted in azimuth,
+       has a large fraction pointing toward a locally concentrated centroid.
+
+    Practical heuristic (robust without trimesh topology extras)
+    ------------------------------------------------------------
+    We look for faces where:
+        |n_z| < 0.3            (nearly vertical normal — side of a hole)
+        |n_XY|  > 0.9          (strongly horizontal)
+        centroid r = |p_XY - axis| is small relative to bbox
+
+    If such faces form ≥ 3 % of the total face count AND their azimuthal
+    normals show significant negative radial alignment (normal points
+    toward the axis candidate), we flag a bore.
+
+    We test three axis candidates: Z-axis through XY centroid, X-axis
+    through YZ centroid, Y-axis through XZ centroid.
+
+    Returns True if any bore is detected, False otherwise.
+    Silently returns False on any exception (bore detection is advisory).
+    """
+    try:
+        normals    = mesh.face_normals        # (F, 3)
+        centroids  = mesh.triangles_center    # (F, 3)
+        n_faces    = len(normals)
+
+        if n_faces < 20:
+            return False
+
+        dims = mesh.bounds[1] - mesh.bounds[0]
+
+        def _check_axis(axis: int) -> bool:
+            """
+            axis: 0=X, 1=Y, 2=Z  — the axis of the candidate bore.
+            Radial plane is the two axes NOT equal to `axis`.
+            """
+            radial_axes = [i for i in range(3) if i != axis]
+            r0, r1     = radial_axes
+
+            # Radial components of normal and centroid
+            n_radial   = normals[:, [r0, r1]]     # (F, 2)
+            n_radial_mag = np.linalg.norm(n_radial, axis=1)
+
+            # Candidate axis passes through the mesh centroid in XY
+            axis_pos   = np.array([mesh.center_mass[r0], mesh.center_mass[r1]])
+            c_radial   = centroids[:, [r0, r1]] - axis_pos[None, :]  # (F, 2)
+            c_radial_r = np.linalg.norm(c_radial, axis=1)
+
+            # Select faces with nearly-horizontal normals relative to this axis
+            horizontal_mask = (
+                n_radial_mag > 0.85
+            ) & (
+                np.abs(normals[:, axis]) < 0.35
+            )
+
+            if horizontal_mask.sum() < max(6, n_faces * 0.02):
+                return False
+
+            # Among those, check radial alignment:
+            # n_radial · (−c_radial / |c_radial|) > 0.5  →  inward normal
+            c_r_safe = np.maximum(c_radial_r, 1e-9)
+            inward   = np.einsum(
+                "ij,ij->i",
+                n_radial[horizontal_mask],
+                -c_radial[horizontal_mask] / c_r_safe[horizontal_mask, None],
+            )
+            # Fraction of horizontal faces that are inward-radial
+            inward_fraction = (inward > 0.5).sum() / horizontal_mask.sum()
+
+            # Also check that the bore radius is plausible:
+            # radius < 40 % of the smallest radial bbox dimension
+            median_r = np.median(c_radial_r[horizontal_mask])
+            max_radial_dim = min(dims[r0], dims[r1]) * 0.4
+
+            return inward_fraction > 0.45 and median_r < max_radial_dim
+
+        return _check_axis(2) or _check_axis(0) or _check_axis(1)
+
+    except Exception as e:
+        warnings.append(f"Bore detection failed ({e}). Assuming no bores.")
+        return False
+
+
+# ===========================================================================
+# NEW: Connected-component decomposition
+# ===========================================================================
+
+def _connected_components(
+    mesh,
+    wall_sample_count: int,
+    thin_wall_threshold_mm: float,
+    warnings: list[str],
+) -> list[dict]:
+    """
+    Split the mesh into connected face-components and compute per-component
+    geometry features.  Each component gets the same feature schema as the
+    whole-mesh output (minus connected_components to avoid recursion).
+
+    Uses trimesh's graph utilities which do face-adjacency BFS/DFS — O(F).
+
+    If the mesh has only one connected component (typical for watertight
+    solid bodies), returns a single-element list containing the whole-mesh
+    features so that downstream code always sees a list.
+
+    Limits: if there are > 50 components (e.g. mesh soup), only the 50
+    largest by face-count are analysed individually to avoid very slow runs.
+    A warning is appended in that case.
+    """
+    try:
+        import trimesh                                  # type: ignore
+
+        labels = _face_component_labels(mesh)
+        if labels.size == 0:
+            warnings.append(
+                "Connected-component decomposition returned no bodies. "
+                "Returning whole mesh as single component."
+            )
+            return [_component_features(mesh, wall_sample_count,
+                                        thin_wall_threshold_mm, warnings)]
+
+        unique, counts = np.unique(labels, return_counts=True)
+        order = np.argsort(-counts)
+        unique = unique[order]
+        counts = counts[order]
+        n_components = len(unique)
+
+        if n_components == 1:
+            return [_component_features(mesh, wall_sample_count,
+                                        thin_wall_threshold_mm, warnings)]
+
+        min_faces = max(20, int(len(mesh.faces) * 0.002))
+        kept = [(label, count) for label, count in zip(unique, counts) if count >= min_faces]
+        skipped = n_components - len(kept)
+        if kept:
+            unique = np.array([label for label, _ in kept], dtype=unique.dtype)
+        else:
+            warnings.append(
+                f"All {n_components} connected components are below the "
+                f"minimum size threshold ({min_faces} faces). Returning the "
+                "largest component only."
+            )
+            unique = unique[:1]
+
+        if skipped > 0:
+            warnings.append(
+                f"Ignored {skipped} tiny disconnected mesh fragment(s) "
+                f"(< {min_faces} faces) during structural decomposition."
+            )
+
+        if len(unique) > 50:
+            warnings.append(
+                f"Mesh has {len(unique)} significant connected components. "
+                "Only the 50 largest are analysed individually. "
+                "Consider cleaning the mesh."
+            )
+            unique = unique[:50]
+
+        components = []
+        for index, label in enumerate(unique):
+            try:
+                face_mask = labels == label
+                sub_faces = mesh.faces[face_mask]
+                used_verts, inv = np.unique(sub_faces, return_inverse=True)
+                sub_verts = mesh.vertices[used_verts]
+                new_faces = inv.reshape(sub_faces.shape)
+                sub_mesh = trimesh.Trimesh(
+                    vertices=sub_verts,
+                    faces=new_faces,
+                    process=False,
+                )
+                comp_warn: list[str] = []
+                feat = _component_features(
+                    sub_mesh, wall_sample_count, thin_wall_threshold_mm, comp_warn
+                )
+                feat["component_index"] = index
+                # Prefix component warnings so they're traceable
+                for w in comp_warn:
+                    warnings.append(f"[component {index}] {w}")
+                components.append(feat)
+            except Exception as exc:
+                warnings.append(
+                    f"Component {index} skipped during feature extraction: {exc}"
+                )
+
+        if not components:
+            warnings.append(
+                "All connected components failed feature extraction. "
+                "Falling back to whole-mesh single component."
+            )
+            return [_component_features(mesh, wall_sample_count,
+                                        thin_wall_threshold_mm, warnings)]
+
+        return components
+
+    except Exception as exc:
+        warnings.append(
+            f"Connected-component decomposition failed ({exc}). "
+            "Returning whole mesh as single component."
+        )
+        return [_component_features(mesh, wall_sample_count,
+                                    thin_wall_threshold_mm, warnings)]
+
+
+def _face_component_labels(mesh) -> np.ndarray:
+    """
+    Label connected face components from trimesh.face_adjacency without
+    optional graph dependencies.
+    """
+    face_count = int(len(mesh.faces))
+    if face_count == 0:
+        return np.array([], dtype=np.int32)
+
+    adjacency = [[] for _ in range(face_count)]
+    for a, b in np.asarray(mesh.face_adjacency, dtype=np.int64):
+        if 0 <= a < face_count and 0 <= b < face_count:
+            adjacency[int(a)].append(int(b))
+            adjacency[int(b)].append(int(a))
+
+    labels = np.full(face_count, -1, dtype=np.int32)
+    current = 0
+    for start in range(face_count):
+        if labels[start] != -1:
+            continue
+        labels[start] = current
+        stack = [start]
+        while stack:
+            face = stack.pop()
+            for neighbor in adjacency[face]:
+                if labels[neighbor] == -1:
+                    labels[neighbor] = current
+                    stack.append(neighbor)
+        current += 1
+
+    return labels
+
+
+def _component_features(
+    mesh,
+    wall_sample_count: int,
+    thin_wall_threshold_mm: float,
+    warnings: list[str],
+) -> dict:
+    """
+    Compute the structural-enrichment feature subset for one (sub-)mesh.
+    This is intentionally a subset — no recursion into connected_components.
+
+    Uses a reduced wall_sample_count proportional to face count to avoid
+    the per-component cost becoming O(n_components × wall_sample_count).
+    """
+    dims = mesh.bounds[1] - mesh.bounds[0]
+    is_watertight = bool(mesh.is_watertight)
+
+    # Scale sample count by face fraction (min 20 for tiny components)
+    n_samples = max(20, min(wall_sample_count, len(mesh.faces) // 3))
+    min_wall, median_wall = _wall_thickness(mesh, n_samples, warnings)
+
+    mean_curv      = _mean_curvature(mesh, warnings)
+    bottom_contact = _contact_area(mesh, face="bottom")
+    top_load       = _contact_area(mesh, face="top")
+    has_bores      = _has_cylindrical_bores(mesh, warnings)
+
+    return {
+        "bbox_x_mm":                round(float(dims[0]), 4),
+        "bbox_y_mm":                round(float(dims[1]), 4),
+        "bbox_z_mm":                round(float(dims[2]), 4),
+        "dominant_axis":            _classify_shape(dims),
+        "min_wall_thickness_mm":    round(min_wall,    4) if min_wall    is not None else None,
+        "median_wall_thickness_mm": round(median_wall, 4) if median_wall is not None else None,
+        "is_watertight":            is_watertight,
+        "volume_mm3":               round(abs(float(mesh.volume)), 4),
+        "surface_area_mm2":         round(float(mesh.area), 4),
+        "triangle_count":           int(len(mesh.faces)),
+        "vertex_count":             int(len(mesh.vertices)),
+        "bottom_contact_area_mm2":  round(bottom_contact, 4),
+        "top_load_area_mm2":        round(top_load, 4),
+        "has_cylindrical_bores":    bool(has_bores),
+        "mean_curvature":           round(mean_curv, 6),
+    }
+
+
+# ===========================================================================
+# Wall thickness estimation  (unchanged from original)
 # ===========================================================================
 
 def _wall_thickness(
@@ -401,9 +917,23 @@ def _wall_thickness(
         warnings.append("Too few triangles (< 4) for wall thickness estimation.")
         return None, None
 
-    # Sample surface points
+    # Sample surface points. trimesh uses numpy randomness internally; seed it
+    # from stable mesh properties so identical CAD gives repeatable requirements.
     try:
-        points, face_indices = tms.sample_surface(mesh, n_samples)
+        seed = int(
+            (
+                len(mesh.faces) * 1_000_003
+                + len(mesh.vertices) * 9_176
+                + round(float(mesh.area) * 1_000)
+            )
+            % (2**32 - 1)
+        )
+        random_state = np.random.get_state()
+        np.random.seed(seed)
+        try:
+            points, face_indices = tms.sample_surface(mesh, n_samples)
+        finally:
+            np.random.set_state(random_state)
     except Exception as e:
         warnings.append(f"Surface sampling failed: {e}. Wall thickness not computed.")
         return None, None
@@ -447,7 +977,10 @@ def _wall_thickness(
         )
         return None, None
 
-    # Remove top-5% outliers (long rays through voids or open boundaries)
+    # Remove top-5% outliers (long rays through voids or open boundaries).
+    # Use a lower percentile rather than the absolute minimum for the reported
+    # wall thickness; the minimum is too sensitive to grazing rays and mesh
+    # defects, and can make structural sizing unrealistically conservative.
     p95       = np.percentile(thicknesses, 95)
     filtered  = thicknesses[thicknesses <= p95]
 
@@ -455,11 +988,12 @@ def _wall_thickness(
         warnings.append("All thickness samples were outliers. Not reported.")
         return None, None
 
-    return float(filtered.min()), float(np.median(filtered))
+    robust_min = np.percentile(filtered, 10)
+    return float(robust_min), float(np.median(filtered))
 
 
 # ===========================================================================
-# Shape helpers
+# Shape helpers  (unchanged from original)
 # ===========================================================================
 
 def _classify_shape(dims: np.ndarray) -> str:

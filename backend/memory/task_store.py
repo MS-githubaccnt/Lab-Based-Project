@@ -4,11 +4,8 @@ memory/task_store.py
 TaskStore: abstract interface for task progress persistence.
 InMemoryTaskStore: thread-safe in-process implementation (dev/testing).
 
-The frontend polls get_task() to render:
-  - Live status messages and thoughts during pipeline execution
-  - Clarification question when the pipeline pauses for user input
-  - Final report on completion
-  - Error details on failure
+The frontend polls get_task() to render live status messages, thoughts,
+the final report, and any error details.
 
 To use Redis in production, implement AbstractTaskStore and pass your
 implementation to ChatService:
@@ -61,8 +58,7 @@ class AbstractTaskStore(ABC):
         result: Dict[str, Any],
     ) -> None:
         """
-        Mark the task as 'complete' or 'clarification_needed' depending
-        on result['status'], and store the full PipelineResult dict.
+        Mark the task as complete and store the full PipelineResult dict.
         """
 
     @abstractmethod
@@ -92,12 +88,10 @@ class InMemoryTaskStore(AbstractTaskStore):
 
     Task state schema:
         task_id                 str
-        status                  'pending' | 'running' | 'clarification_needed'
-                                | 'complete' | 'failed'
+        status                  'pending' | 'running' | 'complete' | 'failed'
         progress                str     — latest status message
         thoughts                list    — all Thought dicts emitted so far
         result                  dict | None   — PipelineResult on completion
-        clarification_question  str | None    — when status=clarification_needed
         error                   str | None    — when status=failed
         created_at              float   — unix timestamp
         updated_at              float   — unix timestamp
@@ -115,7 +109,6 @@ class InMemoryTaskStore(AbstractTaskStore):
                 "progress":              "Initialising...",
                 "thoughts":              [],
                 "result":                None,
-                "clarification_question": None,
                 "error":                 None,
                 "created_at":            time.time(),
                 "updated_at":            time.time(),
@@ -149,11 +142,7 @@ class InMemoryTaskStore(AbstractTaskStore):
 
             pipeline_status = result.get("status", "complete")
 
-            if pipeline_status == "clarification_needed":
-                task["status"]                 = "clarification_needed"
-                task["clarification_question"] = result.get("clarification_question")
-                task["progress"]               = "Waiting for your answer..."
-            elif pipeline_status == "followup_answered":
+            if pipeline_status == "followup_answered":
                 task["status"]   = "complete"
                 task["progress"] = "Follow-up answered."
             else:

@@ -29,7 +29,7 @@ The supervisor node is compiled with ALL edges running through it:
     builder.set_entry_point("supervisor")
 
     # Each content node routes back to supervisor on completion
-    for node in [cad_parser, load_inference, clarification,
+    for node in [cad_parser, load_inference,
                  feature_translation, ml_predictor, explanation,
                  report_assembly]:
         builder.add_node(node.__name__, node)
@@ -123,7 +123,6 @@ class SupervisorNode(BaseAgentNode):
         dispatch = {
             PipelineStage.CAD_PARSER:          self._gate_cad_parser,
             PipelineStage.LOAD_INFERENCE:      self._gate_load_inference,
-            PipelineStage.CLARIFICATION:       self._gate_clarification,
             PipelineStage.FEATURE_TRANSLATION: self._gate_feature_translation,
             PipelineStage.ML_PREDICTOR:        self._gate_ml_predictor,
             PipelineStage.EXPLANATION:         self._gate_explanation,
@@ -234,7 +233,7 @@ class SupervisorNode(BaseAgentNode):
         Validate load_estimate output from load_inference.
 
         Routes:
-          confidence < threshold        -> clarification
+          confidence < threshold        -> continue with warning
           zero force on mechanical part -> retry (once)
           retries exhausted             -> abort
           all checks pass               -> feature_translation
@@ -254,8 +253,7 @@ class SupervisorNode(BaseAgentNode):
                 trigger=(
                     f"load_inference_retries = {retries} >= "
                     f"{self.thresholds.MAX_LOAD_INFERENCE_RETRIES}. "
-                    "Pipeline could not produce a confident load estimate "
-                    "even after clarification."
+                    "Pipeline could not produce a confident load estimate."
                 ),
                 state_snapshot={
                     "object_description": state.get("object_description"),
@@ -266,14 +264,12 @@ class SupervisorNode(BaseAgentNode):
                 state=state,
             )
 
-        # ── Route: low confidence -> clarification ─────────────────────
+        # ── Warn: low confidence, but continue without pausing ─────────
         if conf < self.thresholds.CONFIDENCE_THRESHOLD:
-            return Command(
-                goto=NextNode.CLARIFICATION,
-                update={
-                    "_next": NextNode.CLARIFICATION,
-                    "supervisor_warnings": warnings,
-                },
+            warnings.append(
+                f"Load inference confidence is {conf:.2f}, below the "
+                f"recommended {self.thresholds.CONFIDENCE_THRESHOLD:.2f}. "
+                "Continuing without pausing as configured."
             )
 
         # ── Retry: zero magnitude on a mechanical part ─────────────────
@@ -291,8 +287,7 @@ class SupervisorNode(BaseAgentNode):
                     "_next": NextNode.LOAD_INFERENCE,
                     "supervisor_warnings": warnings,
                     "load_inference_retries": retries + 1,
-                    # Inject a clarification hint so load_inference knows why it's retrying
-                    "clarification_answer": (
+                    "load_inference_hint": (
                         "The part carries a non-zero mechanical load. "
                         "Please estimate a realistic force magnitude range "
                         "for this object class."
@@ -316,16 +311,6 @@ class SupervisorNode(BaseAgentNode):
                 "_next": NextNode.FEATURE_TRANSLATION,
                 "supervisor_warnings": warnings,
             },
-        )
-
-    async def _gate_clarification(self, state: Dict[str, Any]) -> Command:
-        """
-        After clarification, always route back to load_inference.
-        The clarification_answer is already in state.
-        """
-        return Command(
-            goto=NextNode.LOAD_INFERENCE,
-            update={"_next": NextNode.LOAD_INFERENCE},
         )
 
     async def _gate_feature_translation(self, state: Dict[str, Any]) -> Command:

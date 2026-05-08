@@ -1,6 +1,6 @@
 from __future__ import annotations
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Tuple
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -34,8 +34,7 @@ class LoadEstimate(BaseModel):
     """
     Structured load profile inferred by the load_inference LLM node.
 
-    All fields are required except clarification_question, which is only
-    populated when confidence < CONFIDENCE_THRESHOLD.
+    All fields are required.
     """
 
     # ── Load character ────────────────────────────────────────────────────
@@ -141,22 +140,6 @@ class LoadEstimate(BaseModel):
         )
     )
 
-    # ── Clarification ─────────────────────────────────────────────────────
-    clarification_question: Optional[str] = Field(
-        default=None,
-        description=(
-            "Populate ONLY when confidence < 0.75. "
-            "Ask the single question whose answer would most reduce uncertainty. "
-            "Make it specific and answerable in one sentence. "
-            "Examples: "
-            "'Is this bracket structural (load-bearing) or decorative?' "
-            "'What is the maximum force this part will experience in operation?' "
-            "'Is this a marine, automotive, or indoor environment?' "
-            "Do NOT ask multiple questions. "
-            "Leave null when confidence >= 0.75."
-        )
-    )
-
     # ── Validators ────────────────────────────────────────────────────────
 
     @field_validator("confidence")
@@ -206,21 +189,10 @@ class LoadEstimate(BaseModel):
         return (lo, hi)
 
     @model_validator(mode="after")
-    def clarification_consistency(self) -> "LoadEstimate":
+    def thermal_consistency(self) -> "LoadEstimate":
         """
-        Ensure clarification_question is populated iff confidence < 0.75,
-        and that purely thermal parts use stress_mode='none'.
+        Ensure purely thermal parts use stress_mode='none'.
         """
-        if self.confidence < 0.75 and self.clarification_question is None:
-            # LLM forgot to generate a question — insert a generic fallback
-            self.clarification_question = (
-                "Could you describe the primary function of this part and "
-                "the maximum force or load it will experience in use?"
-            )
-        if self.confidence >= 0.75 and self.clarification_question is not None:
-            # LLM generated a question despite high confidence — discard it
-            self.clarification_question = None
-
         if (
             self.load_type == LoadType.THERMAL
             and self.primary_stress_mode != StressMode.NONE
@@ -232,5 +204,5 @@ class LoadEstimate(BaseModel):
         return self
 
 
-# Threshold used by the node to decide whether to route to clarification
+# Threshold used by the supervisor to decide when to warn about uncertainty.
 CONFIDENCE_THRESHOLD: float = 0.75

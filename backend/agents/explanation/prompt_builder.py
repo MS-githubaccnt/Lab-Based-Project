@@ -11,7 +11,7 @@ Three static methods:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from abc import ABC, abstractmethod
 
 
@@ -101,7 +101,6 @@ and redirect to what you can address from the data.
         load_estimate: Dict[str, Any],
         ml_input_vector: Dict[str, Any],
         predictions: List[Dict[str, Any]],
-        clarification_answer: Optional[str] = None,
     ) -> str:
         """
         User message for the initial explanation call (Mode 1).
@@ -116,8 +115,6 @@ and redirect to what you can address from the data.
 
         lines = ["## Part"]
         lines.append(f"  Description: {object_description.strip()}")
-        if clarification_answer:
-            lines.append(f"  User clarified: {clarification_answer.strip()}")
 
         lines += ["", "## Geometry"]
         lines += _fmt_geometry(geometry)
