@@ -286,9 +286,9 @@ def _fmt_prediction(
     rank: int,
 ) -> List[str]:
     lines = [f"  Material:          {pred.get('material_name', 'Unknown')}"]
-    eco  = pred.get("eco_score")
+   # eco  = pred.get("eco_score")
     conf = pred.get("confidence")
-    if eco  is not None: lines.append(f"  Eco score:         {eco:.3f}")
+    # if eco  is not None: lines.append(f"  Eco score:         {eco:.3f}")
     if conf is not None: lines.append(f"  Model confidence:  {conf:.3f}")
     p_str = pred.get("predicted_strength_MPa")
     r_str = req.get("required_tensile_strength_MPa")

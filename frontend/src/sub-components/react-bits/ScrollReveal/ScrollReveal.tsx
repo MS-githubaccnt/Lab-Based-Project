@@ -15,6 +15,7 @@ interface ScrollRevealProps {
   textClassName?: string;
   rotationEnd?: string;
   wordAnimationEnd?: string;
+  useScroll?: boolean;
 }
 
 const ScrollReveal: React.FC<ScrollRevealProps> = ({
@@ -27,7 +28,8 @@ const ScrollReveal: React.FC<ScrollRevealProps> = ({
   containerClassName = '',
   textClassName = '',
   rotationEnd = 'bottom bottom',
-  wordAnimationEnd = 'bottom bottom'
+  wordAnimationEnd = 'bottom bottom',
+  useScroll = false
 }) => {
   const containerRef = useRef<HTMLHeadingElement>(null);
 
@@ -56,13 +58,14 @@ const ScrollReveal: React.FC<ScrollRevealProps> = ({
         {
           ease: 'none',
           rotate: 0,
-          scrollTrigger: {
+          duration: useScroll ? undefined : 0.8,
+          scrollTrigger: useScroll ? {
             trigger: el,
             scroller,
             start: 'top bottom',
             end: rotationEnd,
             scrub: true
-          }
+          } : undefined
         }
       );
 
@@ -75,13 +78,14 @@ const ScrollReveal: React.FC<ScrollRevealProps> = ({
           ease: 'none',
           opacity: 1,
           stagger: 0.05,
-          scrollTrigger: {
+          duration: useScroll ? undefined : 0.5,
+          scrollTrigger: useScroll ? {
             trigger: el,
             scroller,
             start: 'top bottom-=20%',
             end: wordAnimationEnd,
             scrub: true
-          }
+          } : undefined
         }
       );
 
@@ -93,13 +97,14 @@ const ScrollReveal: React.FC<ScrollRevealProps> = ({
             ease: 'none',
             filter: 'blur(0px)',
             stagger: 0.05,
-            scrollTrigger: {
+            duration: useScroll ? undefined : 0.5,
+            scrollTrigger: useScroll ? {
               trigger: el,
               scroller,
               start: 'top bottom-=20%',
               end: wordAnimationEnd,
               scrub: true
-            }
+            } : undefined
           }
         );
       }
@@ -108,7 +113,7 @@ const ScrollReveal: React.FC<ScrollRevealProps> = ({
     return () => {
       ctx.revert();
     };
-  }, [scrollContainerRef, enableBlur, baseRotation, baseOpacity, rotationEnd, wordAnimationEnd, blurStrength]);
+  }, [scrollContainerRef, enableBlur, baseRotation, baseOpacity, rotationEnd, wordAnimationEnd, blurStrength, useScroll]);
 
   return (
     <div ref={containerRef} className={`w-full ${containerClassName}`}>

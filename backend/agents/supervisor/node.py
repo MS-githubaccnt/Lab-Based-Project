@@ -436,15 +436,15 @@ class SupervisorNode(BaseAgentNode):
             )
 
         # ── Warn: best eco score below threshold ───────────────────────
-        top_eco = predictions[0].get("eco_score", 1.0)
-        if top_eco < self.thresholds.MIN_ECO_SCORE_FOR_GOOD_FIT:
-            warnings.append(
-                f"The highest eco score among candidates is {top_eco:.2f} "
-                f"(threshold: {self.thresholds.MIN_ECO_SCORE_FOR_GOOD_FIT:.2f}). "
-                "No strongly eco-friendly material was found that meets the "
-                "mechanical requirements. Consider relaxing the load constraints "
-                "or revising the design to allow lighter-duty materials."
-            )
+        # top_eco = predictions[0].get("eco_score", 1.0)
+        # if top_eco < self.thresholds.MIN_ECO_SCORE_FOR_GOOD_FIT:
+        #     warnings.append(
+        #         f"The highest eco score among candidates is {top_eco:.2f} "
+        #         f"(threshold: {self.thresholds.MIN_ECO_SCORE_FOR_GOOD_FIT:.2f}). "
+        #         "No strongly eco-friendly material was found that meets the "
+        #         "mechanical requirements. Consider relaxing the load constraints "
+        #         "or revising the design to allow lighter-duty materials."
+        #     )
 
         return Command(
             goto=NextNode.EXPLANATION,

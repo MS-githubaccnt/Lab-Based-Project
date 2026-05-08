@@ -66,7 +66,7 @@ class QualityThresholds:
 
     # ML predictor
     MIN_PREDICTION_CONFIDENCE:  float = 0.4
-    MIN_ECO_SCORE_FOR_GOOD_FIT: float = 0.3
+    #MIN_ECO_SCORE_FOR_GOOD_FIT: float = 0.3
 
 
 # ---------------------------------------------------------------------------
